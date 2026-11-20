@@ -249,12 +249,13 @@ var
   Doc: TMarkerDocument;
   Renderer: TMarkerRenderer;
   Pixels: TRGBAPixels;
-  X, LightPeak, DarkPeak: Integer;
+  X, Y, LightPeak, DarkPeak, PencilWidth, NormalWidth: Integer;
   HasTexture, HasSolidColor: Boolean;
 begin
   Doc := MakeDocument;
   SetLength(Doc.Strokes, 1);
   Doc.Strokes[0].Style := DefaultStyle(pkPencil);
+  Doc.Strokes[0].Style.Width := 40;
   Doc.Strokes[0].Samples[0].Pressure := 0.1;
   Doc.Strokes[0].Samples[1].Pressure := 0.1;
   Renderer := TMarkerRenderer.Create;
@@ -262,6 +263,17 @@ begin
     Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);
     LightPeak := 0;
     for X := 25 to 119 do LightPeak := Max(LightPeak, Pixels[40 * 320 + X].A);
+    PencilWidth := 0;
+    for Y := 0 to 179 do
+      if Pixels[Y * 320 + 80].A > 0 then Inc(PencilWidth);
+    Doc.Strokes[0].Style.Kind := pkNormal;
+    Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);
+    NormalWidth := 0;
+    for Y := 0 to 179 do
+      if Pixels[Y * 320 + 80].A > 0 then Inc(NormalWidth);
+    Check((NormalWidth > 0) and (Abs(NormalWidth - PencilWidth) <= 1),
+      'Changing pencil to normal pen preserves stroke width at low pressure');
+    Doc.Strokes[0].Style.Kind := pkPencil;
     Doc.Strokes[0].Samples[0].Pressure := 1;
     Doc.Strokes[0].Samples[1].Pressure := 1;
     Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);

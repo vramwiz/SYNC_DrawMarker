@@ -25,6 +25,7 @@ type
     FThumbColor: TColor;
     FTickColor: TColor;
     FWheelChangesPosition: Boolean;
+    FWheelRemainder: Integer;
     procedure CMEnabledChanged(var Message: TMessage);
       message CM_ENABLEDCHANGED;
     procedure CMFocusChanged(var Message: TCMFocusChanged);
@@ -150,14 +151,15 @@ end;
 
 function THorizontalTrackBarControl.DoMouseWheel(Shift: TShiftState;
   WheelDelta: Integer; MousePos: TPoint): Boolean;
+var Steps: Integer;
 begin
   Result := Enabled and FWheelChangesPosition and (WheelDelta <> 0);
   if Result then
   begin
-    if WheelDelta > 0 then
-      Position := FPosition + FSmallChange
-    else
-      Position := FPosition - FSmallChange;
+    Inc(FWheelRemainder, WheelDelta);
+    Steps := FWheelRemainder div WHEEL_DELTA;
+    FWheelRemainder := FWheelRemainder mod WHEEL_DELTA;
+    if Steps <> 0 then Position := FPosition + Steps * FSmallChange;
   end
   else
     Result := inherited DoMouseWheel(Shift, WheelDelta, MousePos);

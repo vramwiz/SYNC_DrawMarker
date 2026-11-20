@@ -514,8 +514,7 @@ var
 
   function PointRadius(Pressure: Double): Single;
   begin
-    if Pencil then Result := Radius * (0.65 + 0.35 * Pressure)
-    else Result := Radius * (0.21 + 0.79 * Pressure);
+    Result := Radius * (0.21 + 0.79 * Pressure);
   end;
 
   function PointDensity(Pressure: Double): Double;

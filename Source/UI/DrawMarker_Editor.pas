@@ -36,8 +36,9 @@ type
     procedure WndProc(var Message: TMessage); override;
   end;
 
-  TDragPart = (dpNone, dpStroke, dpVertex, dpIncoming, dpOutgoing);
+  TDragPart = (dpNone, dpStroke, dpVertex, dpIncoming, dpOutgoing, dpMarquee);
   TMarkerTool = (mtSelect, mtContinuous, mtFreehand);
+  TStyleField = (sfPen, sfWidth, sfTransparency, sfTip, sfRotation, sfColor);
   TChromePanelClass = class of TPanel;
 
   TMarkerToolButton = class(TSpeedButton)
@@ -95,7 +96,9 @@ type
     FRenderValid, FPreviewActive, FPreviewFreehand: Boolean;
     FUndo, FRedo: TList<TMarkerDocument>;
     FSelected, FVertex: Integer;
+    FSelectedStrokes: TArray<Integer>;
     FDragging: TDragPart;
+    FMarqueeStart, FMarqueeEnd: TPoint;
     FBeforeDrag: TMarkerDocument;
     FDragOrigin: TPointF;
     FDragChanged: Boolean;
@@ -132,6 +135,9 @@ type
     procedure AddFreehandSample(const P: TPoint; Timestamp: Cardinal; Pressure: Single);
     procedure FinishFreehand(Cancel: Boolean);
     procedure SelectTool(Sender: TObject);
+    procedure SetSelection(const Indices: TArray<Integer>);
+    function MarqueeBounds: TRect;
+    procedure SelectInRect(const Bounds: TRect);
     procedure UndoClick(Sender: TObject);
     procedure RedoClick(Sender: TObject);
     procedure DeleteClick(Sender: TObject);
@@ -146,7 +152,7 @@ type
     procedure PenChange(Sender: TObject);
     procedure StyleChange(Sender: TObject);
     function CurrentStyle: TStrokeStyle;
-    procedure ApplyStyle(Sender: TObject);
+    procedure ApplyStyle(Sender: TObject; Field: TStyleField; const Value: TStrokeStyle);
     procedure StyleMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure StyleMouseUp(Sender: TObject; Button: TMouseButton;
@@ -172,6 +178,7 @@ type
       const Background: TMarkerCapture);
     destructor Destroy; override;
     function IsShortCut(var Message: TWMKey): Boolean; override;
+    procedure MouseWheelHandler(var Message: TMessage); override;
   end;
 
 function PromotedMouse: Boolean;
@@ -188,7 +195,12 @@ procedure TMarkerCanvas.WndProc(var Message: TMessage);
 begin
   if FEditor <> nil then
     case Message.Msg of
-      WM_LBUTTONUP: FEditor.EndDrag(False);
+      WM_LBUTTONUP:
+        begin
+          if FEditor.FDragging = dpMarquee then
+            FEditor.FMarqueeEnd := SmallPointToPoint(TWMMouse(Message).Pos);
+          FEditor.EndDrag(False);
+        end;
       WM_POINTERDOWN, WM_POINTERUPDATE, WM_POINTERUP, WM_POINTERCAPTURECHANGED:
         if FEditor.HandlePointer(Message) then
         begin
@@ -366,7 +378,7 @@ begin
   Result.ThumbBorderColor := TextColor;
   Result.ShowTicks := False;
   Result.SetRange(Min, Max);
-  Result.WheelChangesPosition := False;
+  Result.WheelChangesPosition := True;
 end;
 
 constructor TMarkerColorDock.Create(AOwner: TComponent);
@@ -647,7 +659,7 @@ end;
 procedure TMarkerEditor.SetStatus;
 begin
   case FTool of
-    mtSelect: FStatus.Caption := '線・頂点・ハンドルをドラッグ　右クリックで頂点の追加・削除';
+    mtSelect: FStatus.Caption := '空いている場所からドラッグで範囲選択　線や頂点をドラッグで移動　右クリックで編集';
     mtContinuous: FStatus.Caption := 'クリックで頂点を追加　終点をダブルクリックで確定';
     mtFreehand: FStatus.Caption := 'マウスでドラッグ、またはペンで手描き';
   end;
@@ -795,16 +807,23 @@ var Tool: TMarkerTool;
 begin
   Tool := TMarkerTool(TSpeedButton(Sender).Tag);
   if Tool = FTool then Exit;
+  EndDrag(True);
   FinishCurve;
   FinishFreehand(True);
   FTool := Tool;
-  if FTool <> mtSelect then
-  begin
-    FSelected := -1;
-    FVertex := -1;
-  end;
+  if FTool <> mtSelect then SetSelection(nil);
   SyncControls;
   FView.Invalidate;
+end;
+
+procedure TMarkerEditor.SetSelection(const Indices: TArray<Integer>);
+begin
+  FSelectedStrokes := Indices;
+  FSelected := -1;
+  FVertex := -1;
+  if Length(Indices) = 0 then Exit;
+  FSelected := Indices[High(Indices)];
+  FStyle := FDoc.Strokes[FSelected].Style;
 end;
 
 procedure TMarkerEditor.UndoClick(Sender: TObject);
@@ -823,8 +842,7 @@ begin
   FRedo.Add(FDoc);
   FDoc := FUndo.Last;
   FUndo.Delete(FUndo.Count - 1);
-  FSelected := -1;
-  FVertex := -1;
+  SetSelection(nil);
   Changed;
 end;
 
@@ -836,16 +854,15 @@ begin
   FUndo.Add(FDoc);
   FDoc := FRedo.Last;
   FRedo.Delete(FRedo.Count - 1);
-  FSelected := -1;
-  FVertex := -1;
+  SetSelection(nil);
   Changed;
 end;
 
 procedure TMarkerEditor.DeleteClick(Sender: TObject);
-var I: Integer; Stroke: ^TMarkerStroke;
+var I, Removed: Integer; Stroke: ^TMarkerStroke;
 begin
-  if (FTool <> mtSelect) or (FSelected < 0) then Exit;
   EndDrag(False);
+  if (FTool <> mtSelect) or (FSelected < 0) then Exit;
   BeginChange;
   Stroke := @FDoc.Strokes[FSelected];
   if (FVertex >= 0) and (Length(Stroke^.Anchors) > 1) then
@@ -856,9 +873,14 @@ begin
   end
   else
   begin
-    for I := FSelected to High(FDoc.Strokes) - 1 do FDoc.Strokes[I] := FDoc.Strokes[I + 1];
-    SetLength(FDoc.Strokes, Length(FDoc.Strokes) - 1);
-    FSelected := -1;
+    Removed := 0;
+    for I := FSelectedStrokes[0] to High(FDoc.Strokes) do
+      if (Removed < Length(FSelectedStrokes)) and (I = FSelectedStrokes[Removed]) then
+        Inc(Removed)
+      else
+        FDoc.Strokes[I - Removed] := FDoc.Strokes[I];
+    SetLength(FDoc.Strokes, Length(FDoc.Strokes) - Removed);
+    SetSelection(nil);
   end;
   FVertex := -1;
   Changed;
@@ -879,7 +901,7 @@ end;
 
 function TMarkerEditor.CanInsertVertex(Segment: Integer; Parameter: Single): Boolean;
 begin
-  Result := (FSelected >= 0) and (FDoc.Strokes[FSelected].Input = ikMouse) and
+  Result := (Length(FSelectedStrokes) = 1) and (FDoc.Strokes[FSelected].Input = ikMouse) and
     (Segment >= 0) and (Segment < High(FDoc.Strokes[FSelected].Anchors)) and
     (Parameter > 0.001) and (Parameter < 0.999) and
     (Length(FDoc.Strokes[FSelected].Anchors) < MaxStrokePoints) and
@@ -930,23 +952,55 @@ begin
   Result := FStyle;
 end;
 
-procedure TMarkerEditor.ApplyStyle(Sender: TObject);
-begin
-  if (FTool = mtSelect) and (FSelected >= 0) then
+procedure TMarkerEditor.ApplyStyle(Sender: TObject; Field: TStyleField; const Value: TStrokeStyle);
+var Index: Integer; Updated: TStrokeStyle; ChangedStroke: Boolean;
+
+  procedure SetField(var Style: TStrokeStyle);
   begin
-    if FDoc.Strokes[FSelected].Style.Matches(FStyle) then Exit;
-    if (FStyleGesture = Sender) and (GetCaptureControl = FStyleGesture) then
-    begin
-      if not FRecordedStyleGesture then
-      begin
-        BeginChange;
-        FRecordedStyleGesture := True;
-      end;
-    end
-    else BeginChange;
-    FDoc.Strokes[FSelected].Style := FStyle;
+    case Field of
+      sfPen: Style.Kind := Value.Kind;
+      sfWidth: Style.Width := Value.Width;
+      sfTransparency: Style.Transparency := Value.Transparency;
+      sfTip: Style.Shape := Value.Shape;
+      sfRotation: Style.Rotation := Value.Rotation;
+      sfColor: Style.RGB := Value.RGB;
+    end;
   end;
-  Changed;
+
+begin
+  if FSelected < 0 then
+  begin
+    SetField(FStyle);
+    Changed;
+    Exit;
+  end;
+
+  ChangedStroke := False;
+  for Index in FSelectedStrokes do
+  begin
+    Updated := FDoc.Strokes[Index].Style;
+    SetField(Updated);
+    if Updated.Matches(FDoc.Strokes[Index].Style) then Continue;
+    if not ChangedStroke then
+    begin
+      if (FStyleGesture = Sender) and (GetCaptureControl = FStyleGesture) then
+      begin
+        if not FRecordedStyleGesture then
+        begin
+          BeginChange;
+          FRecordedStyleGesture := True;
+        end;
+      end
+      else BeginChange;
+      ChangedStroke := True;
+    end;
+    FDoc.Strokes[Index].Style := Updated;
+  end;
+  if ChangedStroke then
+  begin
+    FStyle := CurrentStyle;
+    Changed;
+  end;
 end;
 
 procedure TMarkerEditor.StyleMouseDown(Sender: TObject; Button: TMouseButton;
@@ -966,23 +1020,41 @@ begin
 end;
 
 procedure TMarkerEditor.PenChange(Sender: TObject);
+var Value: TStrokeStyle;
 begin
   if FSync or (FPenPicker.ItemIndex < 0) then Exit;
-  FStyle := CurrentStyle;
-  FStyle.Kind := TPenKind(FPenPicker.ItemIndex);
-  ApplyStyle(Sender);
+  Value := CurrentStyle;
+  Value.Kind := TPenKind(FPenPicker.ItemIndex);
+  ApplyStyle(Sender, sfPen, Value);
 end;
 
 procedure TMarkerEditor.StyleChange(Sender: TObject);
+var Value: TStrokeStyle; Field: TStyleField;
 begin
   if FSync then Exit;
-  FStyle := CurrentStyle;
-  if Sender = FSize then FStyle.Width := FSize.Position
-  else if Sender = FColorDock.FTransparency then FStyle.Transparency := FColorDock.FTransparency.Position
-  else if Sender = FRotation then FStyle.Rotation := FRotation.Position
-  else if FTipPicker.ItemIndex >= 0 then FStyle.Shape := TTipShape(FTipPicker.ItemIndex)
+  Value := CurrentStyle;
+  if Sender = FSize then
+  begin
+    Field := sfWidth;
+    Value.Width := FSize.Position;
+  end
+  else if Sender = FColorDock.FTransparency then
+  begin
+    Field := sfTransparency;
+    Value.Transparency := FColorDock.FTransparency.Position;
+  end
+  else if Sender = FRotation then
+  begin
+    Field := sfRotation;
+    Value.Rotation := FRotation.Position;
+  end
+  else if FTipPicker.ItemIndex >= 0 then
+  begin
+    Field := sfTip;
+    Value.Shape := TTipShape(FTipPicker.ItemIndex);
+  end
   else Exit;
-  ApplyStyle(Sender);
+  ApplyStyle(Sender, Field, Value);
 end;
 
 procedure TMarkerEditor.SyncColor(Color: Cardinal);
@@ -998,35 +1070,36 @@ begin
   end;
   FColorDock.FSample.Brush.Color := Sample;
   FColorDock.FCode.Text := '#' + IntToHex(Color, 6);
+  FColorDock.FCode.Modified := False;
 end;
 
 procedure TMarkerEditor.ColorChange(Sender: TObject);
-var Saturation, Value: Double; Sample: Cardinal;
+var Saturation, Brightness: Double; Sample: Cardinal; Value: TStrokeStyle;
 begin
   if FSync then Exit;
   if Sender = FColorDock.FHue then
   begin
-    ColorToSv(FColorDock.FArea.Color, Saturation, Value);
+    ColorToSv(FColorDock.FArea.Color, Saturation, Brightness);
     FColorDock.FArea.BaseColor := FColorDock.FHue.Color;
-    FColorDock.FArea.Color := HsvToColor(ColorHue(FColorDock.FHue.Color), Saturation, Value);
+    FColorDock.FArea.Color := HsvToColor(ColorHue(FColorDock.FHue.Color), Saturation, Brightness);
   end;
   Sample := ColorToRGB(FColorDock.FArea.Color);
-  FStyle := CurrentStyle;
-  FStyle.RGB := (Cardinal(GetRValue(Sample)) shl 16) or
+  Value := CurrentStyle;
+  Value.RGB := (Cardinal(GetRValue(Sample)) shl 16) or
     (Cardinal(GetGValue(Sample)) shl 8) or GetBValue(Sample);
-  ApplyStyle(Sender);
+  ApplyStyle(Sender, sfColor, Value);
 end;
 
 procedure TMarkerEditor.ColorCodeExit(Sender: TObject);
-var Sample: TColor;
+var Sample: TColor; Value: TStrokeStyle;
 begin
-  if FSync then Exit;
+  if FSync or not FColorDock.FCode.Modified then Exit;
   if TryParseColorCode(FColorDock.FCode.Text, Sample) then
   begin
-    FStyle := CurrentStyle;
-    FStyle.RGB := (Cardinal(GetRValue(Sample)) shl 16) or
+    Value := CurrentStyle;
+    Value.RGB := (Cardinal(GetRValue(Sample)) shl 16) or
       (Cardinal(GetGValue(Sample)) shl 8) or GetBValue(Sample);
-    ApplyStyle(Sender);
+    ApplyStyle(Sender, sfColor, Value);
   end;
   SyncColor(CurrentStyle.RGB);
 end;
@@ -1073,6 +1146,25 @@ begin
   Result := inherited IsShortCut(Message);
 end;
 
+procedure TMarkerEditor.MouseWheelHandler(var Message: TMessage);
+var Target: TWinControl;
+begin
+  if FColorDock = nil then
+  begin
+    inherited;
+    Exit;
+  end;
+  Target := FindVCLWindow(SmallPointToPoint(TWMMouseWheel(Message).Pos));
+  if (Target <> nil) and Target.Enabled and ((Target = FSize) or (Target = FRotation) or
+    (Target = FColorDock.FTransparency)) then
+  begin
+    if ActiveControl = FColorDock.FCode then ColorCodeExit(FColorDock.FCode);
+    Message.Result := Target.Perform(CM_MOUSEWHEEL, Message.WParam, Message.LParam);
+    if Message.Result <> 0 then Exit;
+  end;
+  inherited;
+end;
+
 procedure TMarkerEditor.EditorKey(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
   if (ActiveControl = FColorDock.FCode) and (Key in [VK_RETURN, VK_ESCAPE]) then Exit;
@@ -1104,6 +1196,73 @@ begin
     FContent.Top + Round(P.Y * FContent.Height / FDoc.Height));
 end;
 
+function TMarkerEditor.MarqueeBounds: TRect;
+begin
+  Result := Rect(Min(FMarqueeStart.X, FMarqueeEnd.X), Min(FMarqueeStart.Y, FMarqueeEnd.Y),
+    Max(FMarqueeStart.X, FMarqueeEnd.X) + 1, Max(FMarqueeStart.Y, FMarqueeEnd.Y) + 1);
+  Result.Intersect(FContent);
+end;
+
+procedure TMarkerEditor.SelectInRect(const Bounds: TRect);
+var
+  World: TRectF;
+  Selection: TArray<Integer>;
+  A, B: TPointF;
+  I, J, Count: Integer;
+
+  function ClipAxis(Origin, Delta, Lower, Upper: Single; var First, Last: Single): Boolean;
+  var T0, T1: Single;
+  begin
+    if Delta = 0 then Exit((Origin >= Lower) and (Origin <= Upper));
+    T0 := (Lower - Origin) / Delta;
+    T1 := (Upper - Origin) / Delta;
+    First := Max(First, Min(T0, T1));
+    Last := Min(Last, Max(T0, T1));
+    Result := First <= Last;
+  end;
+
+  function CrossesBounds(const StartPoint, EndPoint: TPointF): Boolean;
+  var First, Last: Single;
+  begin
+    First := 0;
+    Last := 1;
+    Result := ClipAxis(StartPoint.X, EndPoint.X - StartPoint.X, World.Left, World.Right, First, Last) and
+      ClipAxis(StartPoint.Y, EndPoint.Y - StartPoint.Y, World.Top, World.Bottom, First, Last);
+  end;
+
+begin
+  if Bounds.IsEmpty then
+  begin
+    SetSelection(nil);
+    Exit;
+  end;
+  World := TRectF.Create(ToWorld(Bounds.Left, Bounds.Top), ToWorld(Bounds.Right, Bounds.Bottom));
+  EnsurePaths;
+  SetLength(Selection, Length(FPaths));
+  Count := 0;
+  for I := 0 to High(FPaths) do
+  begin
+    if Length(FPaths[I].Points) = 0 then Continue;
+    A := FPaths[I].Points[0].Position;
+    if not World.Contains(A) then
+    begin
+      J := 1;
+      while J <= High(FPaths[I].Points) do
+      begin
+        B := FPaths[I].Points[J].Position;
+        if CrossesBounds(A, B) then Break;
+        A := B;
+        Inc(J);
+      end;
+      if J > High(FPaths[I].Points) then Continue;
+    end;
+    Selection[Count] := I;
+    Inc(Count);
+  end;
+  SetLength(Selection, Count);
+  SetSelection(Selection);
+end;
+
 function TMarkerEditor.HitSelectedPoint(X, Y: Integer; IncludeHandles: Boolean;
   out Index: Integer): TDragPart;
 var A: TCurveAnchor; P: TPoint; I, Radius: Integer;
@@ -1115,7 +1274,7 @@ var A: TCurveAnchor; P: TPoint; I, Radius: Integer;
 begin
   Result := dpNone;
   Index := -1;
-  if FSelected < 0 then Exit;
+  if Length(FSelectedStrokes) <> 1 then Exit;
   Radius := MulDiv(7, FView.CurrentPPI, 96);
   for I := 0 to High(FDoc.Strokes[FSelected].Anchors) do
     if Near(FDoc.Strokes[FSelected].Anchors[I].Position) then
@@ -1143,9 +1302,9 @@ begin
     if Button = mbLeft then CurveClick(Point(X, Y)) else FLastCurveClickTime := 0;
     Exit;
   end;
-  if not FContent.Contains(Point(X, Y)) then Exit;
   if FTool = mtFreehand then
   begin
+    if not FContent.Contains(Point(X, Y)) then Exit;
     if (Button = mbLeft) and not FMouseDrawing then
     begin
       SetCapture(FView.Handle);
@@ -1168,31 +1327,40 @@ begin
   begin
     EnsurePaths;
     Hit := -1;
-    for I := High(FPaths) downto 0 do
-    begin
-      Limit := Max(MulDiv(8, FView.CurrentPPI, 96), FPaths[I].Style.Width *
-        Min(FContent.Width / FDoc.Width, FContent.Height / FDoc.Height) *
-        TipExtent[FPaths[I].Style.Shape] / 2 +
-        MulDiv(4, FView.CurrentPPI, 96));
-      if HitPath(FPaths[I], P, FContent.Width / FDoc.Width,
-        FContent.Height / FDoc.Height, Limit, Segment, T) then
+    if FContent.Contains(Point(X, Y)) then
+      for I := High(FPaths) downto 0 do
       begin
-        Hit := I;
-        HitSegment := Segment;
-        HitT := T;
-        Break;
+        Limit := Max(MulDiv(8, FView.CurrentPPI, 96), FPaths[I].Style.Width *
+          Min(FContent.Width / FDoc.Width, FContent.Height / FDoc.Height) *
+          TipExtent[FPaths[I].Style.Shape] / 2 +
+          MulDiv(4, FView.CurrentPPI, 96));
+        if HitPath(FPaths[I], P, FContent.Width / FDoc.Width,
+          FContent.Height / FDoc.Height, Limit, Segment, T) then
+        begin
+          Hit := I;
+          HitSegment := Segment;
+          HitT := T;
+          Break;
+        end;
       end;
-    end;
-    FSelected := Hit;
-    FVertex := -1;
     if Hit >= 0 then
     begin
-      FStyle := FDoc.Strokes[Hit].Style;
+      if (Button <> mbRight) or (not TArray.Contains<Integer>(FSelectedStrokes, Hit)) then
+        SetSelection([Hit]);
       if InsertWithClick then
         if InsertVertex(HitSegment, HitT) then Exit;
       if not InsertWithClick then FDragging := HitSelectedPoint(X, Y, False, FVertex);
       if FDragging = dpNone then FDragging := dpStroke;
-    end;
+    end
+    else if Button = mbLeft then
+    begin
+      FMarqueeStart := Point(X, Y);
+      FMarqueeEnd := FMarqueeStart;
+      FDragging := dpMarquee;
+      SetCapture(FView.Handle);
+      Exit;
+    end
+    else SetSelection(nil);
   end;
   SyncControls;
   FView.Invalidate;
@@ -1225,6 +1393,12 @@ begin
     Exit;
   end;
   if (FDragging = dpNone) or (GetCapture <> FView.Handle) then Exit;
+  if FDragging = dpMarquee then
+  begin
+    FMarqueeEnd := Point(X, Y);
+    FView.Invalidate;
+    Exit;
+  end;
   P := ToWorld(X, Y);
   Offset := P - FDragOrigin;
   if not FDragChanged then
@@ -1265,10 +1439,25 @@ begin
 end;
 
 procedure TMarkerEditor.EndDrag(Cancel: Boolean);
+var Part: TDragPart; Threshold: Integer;
 begin
   if FDragging = dpNone then Exit;
+  Part := FDragging;
   FDragging := dpNone;
   if GetCapture = FView.Handle then ReleaseCapture;
+  if Part = dpMarquee then
+  begin
+    if not Cancel then
+    begin
+      Threshold := MulDiv(3, FView.CurrentPPI, 96);
+      if Max(Abs(FMarqueeEnd.X - FMarqueeStart.X), Abs(FMarqueeEnd.Y - FMarqueeStart.Y)) >= Threshold then
+        SelectInRect(MarqueeBounds)
+      else SetSelection(nil);
+      SyncControls;
+    end;
+    FView.Invalidate;
+    Exit;
+  end;
   if FDragChanged then
   begin
     if Cancel then FDoc := FBeforeDrag else PushUndo(FBeforeDrag);
@@ -1387,51 +1576,135 @@ begin
 end;
 
 procedure TMarkerEditor.DrawSelection;
+const
+  OutlineColor = TColor($00191410);
+  HighlightColor = TColor($00FFE370);
 var
   A: TCurveAnchor;
-  P, H: TPoint;
-  I, HandleRadius, VertexRadius: Integer;
+  P: TPoint;
+  Index, I, PPI, HandleRadius, VertexRadius: Integer;
   Path: TMarkerPath;
+  Points: TArray<TPoint>;
+  HasLength: Boolean;
+  Bounds: TRect;
   C: TCanvas;
+  DC: HDC;
+  OutlinePen, HighlightPen: HPEN;
+
+  function DashedPen(Color: TColor; Width: Integer): HPEN;
+  var Brush: TLogBrush; Dashes: array[0..1] of DWORD;
+  begin
+    Brush := Default(TLogBrush);
+    Brush.lbStyle := BS_SOLID;
+    Brush.lbColor := ColorToRGB(Color);
+    Dashes[0] := MulDiv(12, PPI, 96);
+    Dashes[1] := MulDiv(8, PPI, 96);
+    Result := ExtCreatePen(PS_GEOMETRIC or PS_USERSTYLE or PS_ENDCAP_FLAT or PS_JOIN_ROUND,
+      MulDiv(Width, PPI, 96), Brush, Length(Dashes), @Dashes[0]);
+  end;
+
+  procedure DashedOutline(const Line: array of TPoint);
+  var PreviousPen: HGDIOBJ; PreviousMode: Integer;
+  begin
+    PreviousMode := SetBkMode(DC, TRANSPARENT);
+    PreviousPen := SelectObject(DC, OutlinePen);
+    try
+      Winapi.Windows.Polyline(DC, Line[0], Length(Line));
+      SelectObject(DC, HighlightPen);
+      Winapi.Windows.Polyline(DC, Line[0], Length(Line));
+    finally
+      SelectObject(DC, PreviousPen);
+      SetBkMode(DC, PreviousMode);
+    end;
+  end;
+
+  procedure SetPen(Color: TColor; Width: Integer);
+  begin
+    C.Pen.Color := Color;
+    C.Pen.Width := MulDiv(Width, PPI, 96);
+  end;
+
+  procedure PointOutline(const Center: TPoint);
+  var Radius: Integer;
+  begin
+    Radius := MulDiv(6, PPI, 96);
+    C.Brush.Style := bsClear;
+    SetPen(OutlineColor, 7);
+    C.Ellipse(Center.X - Radius, Center.Y - Radius, Center.X + Radius + 1, Center.Y + Radius + 1);
+    SetPen(HighlightColor, 3);
+    C.Ellipse(Center.X - Radius, Center.Y - Radius, Center.X + Radius + 1, Center.Y + Radius + 1);
+    C.Brush.Style := bsSolid;
+  end;
+
   procedure Handle(const Offset: TPointF);
+  var H: TPoint;
   begin
     H := ToView(A.Position + Offset);
-    C.MoveTo(P.X, P.Y);
-    C.LineTo(H.X, H.Y);
+    SetPen(OutlineColor, 5);
+    C.Polyline([P, H]);
+    SetPen(HighlightColor, 2);
+    C.Polyline([P, H]);
+    SetPen(OutlineColor, 2);
+    C.Brush.Color := HighlightColor;
     C.Ellipse(H.X - HandleRadius, H.Y - HandleRadius,
       H.X + HandleRadius + 1, H.Y + HandleRadius + 1);
   end;
+
 begin
-  if (FTool <> mtSelect) or (FSelected < 0) then Exit;
-  HandleRadius := MulDiv(4, FView.CurrentPPI, 96);
-  VertexRadius := MulDiv(5, FView.CurrentPPI, 96);
+  if (FTool <> mtSelect) or ((FSelected < 0) and (FDragging <> dpMarquee)) then Exit;
+  PPI := FView.CurrentPPI;
   C := FView.Canvas;
-  C.Pen.Color := clWhite;
-  C.Pen.Style := psDot;
-  Path := FPaths[FSelected];
-  for I := 0 to High(Path.Points) do
-  begin
-    P := ToView(Path.Points[I].Position);
-    if I = 0 then C.MoveTo(P.X, P.Y) else C.LineTo(P.X, P.Y);
-  end;
-  C.Pen.Style := psSolid;
-  for I := 0 to High(FDoc.Strokes[FSelected].Anchors) do
-  begin
-    A := FDoc.Strokes[FSelected].Anchors[I];
-    P := ToView(A.Position);
-    C.Pen.Color := $003B3027;
-    C.Brush.Color := clWhite;
-    if I = FVertex then
+  DC := C.Handle;
+  OutlinePen := DashedPen(OutlineColor, 7);
+  HighlightPen := DashedPen(HighlightColor, 3);
+  try
+    if (OutlinePen = 0) or (HighlightPen = 0) then Exit;
+    for Index in FSelectedStrokes do
     begin
-      C.Pen.Color := $00F5BC5C;
-      C.Brush.Color := $00F5BC5C;
-      if I > 0 then Handle(A.InHandle);
-      if I < High(FDoc.Strokes[FSelected].Anchors) then Handle(A.OutHandle);
+      Path := FPaths[Index];
+      if Length(Path.Points) = 0 then Continue;
+      SetLength(Points, Length(Path.Points));
+      Points[0] := ToView(Path.Points[0].Position);
+      HasLength := False;
+      for I := 1 to High(Points) do
+      begin
+        Points[I] := ToView(Path.Points[I].Position);
+        HasLength := HasLength or (Points[I] <> Points[0]);
+      end;
+      if HasLength then DashedOutline(Points)
+      else PointOutline(Points[0]);
     end;
-    if A.Kind = akSmooth then
-      C.Ellipse(P.X - VertexRadius, P.Y - VertexRadius, P.X + VertexRadius + 1, P.Y + VertexRadius + 1)
-    else
-      C.Rectangle(P.X - VertexRadius, P.Y - VertexRadius, P.X + VertexRadius + 1, P.Y + VertexRadius + 1);
+    if FDragging = dpMarquee then
+    begin
+      Bounds := MarqueeBounds;
+      if not Bounds.IsEmpty then
+        DashedOutline([Bounds.TopLeft, Point(Bounds.Right - 1, Bounds.Top),
+          Point(Bounds.Right - 1, Bounds.Bottom - 1), Point(Bounds.Left, Bounds.Bottom - 1), Bounds.TopLeft]);
+    end;
+    if Length(FSelectedStrokes) <> 1 then Exit;
+    HandleRadius := MulDiv(4, PPI, 96);
+    VertexRadius := MulDiv(5, PPI, 96);
+    for I := 0 to High(FDoc.Strokes[FSelected].Anchors) do
+    begin
+      A := FDoc.Strokes[FSelected].Anchors[I];
+      P := ToView(A.Position);
+      SetPen(OutlineColor, 2);
+      C.Brush.Color := clWhite;
+      if I = FVertex then
+      begin
+        C.Brush.Color := HighlightColor;
+        if I > 0 then Handle(A.InHandle);
+        if I < High(FDoc.Strokes[FSelected].Anchors) then Handle(A.OutHandle);
+      end;
+      if A.Kind = akSmooth then
+        C.Ellipse(P.X - VertexRadius, P.Y - VertexRadius, P.X + VertexRadius + 1, P.Y + VertexRadius + 1)
+      else
+        C.Rectangle(P.X - VertexRadius, P.Y - VertexRadius, P.X + VertexRadius + 1, P.Y + VertexRadius + 1);
+    end;
+  finally
+    C.Pen.Width := 1;
+    DeleteObject(HighlightPen);
+    DeleteObject(OutlinePen);
   end;
 end;
 

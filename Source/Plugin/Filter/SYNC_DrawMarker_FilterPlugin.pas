@@ -10,7 +10,7 @@ uses AviUtl2FilterTypes;
 const
   RequiredHost = 2011000; // v2.1.10: FILTER_ITEM_BUTTON.callback2 / object・effect ID
   PluginName = '手描きマーカー';
-  PluginInfo = '手描きマーカー / SYNC_DrawMarker v0.1.0';
+  PluginInfo = '手描きマーカー / SYNC_DrawMarker v1.0.0';
 
 procedure InitializeMarker;
 procedure RegisterMarker(Table: PHOST_APP_TABLE);

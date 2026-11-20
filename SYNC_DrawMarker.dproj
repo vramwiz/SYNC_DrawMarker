@@ -46,13 +46,13 @@
         <SanitizedProjectName>SYNC_DrawMarker</SanitizedProjectName>
         <Custom_Styles>&quot;Windows Modern Dark|VCLSTYLE|$(BDSCOMMONDIR)\Styles\WindowsModernDark.vsf&quot;</Custom_Styles>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
-        <VerInfo_MajorVer>0</VerInfo_MajorVer>
-        <VerInfo_MinorVer>1</VerInfo_MinorVer>
+        <VerInfo_MajorVer>1</VerInfo_MajorVer>
+        <VerInfo_MinorVer>0</VerInfo_MinorVer>
         <VerInfo_Release>0</VerInfo_Release>
         <VerInfo_Build>0</VerInfo_Build>
         <VerInfo_DLL>true</VerInfo_DLL>
         <VerInfo_Locale>1041</VerInfo_Locale>
-        <VerInfo_Keys>CompanyName=VRAMの魔術師;FileDescription=手描きマーカー;FileVersion=0.1.0.0;InternalName=SYNC_DrawMarker;LegalCopyright=Copyright (c) 2026 VRAMの魔術師;OriginalFilename=SYNC_DrawMarker.aux2;ProductName=SYNC_DrawMarker;ProductVersion=0.1.0</VerInfo_Keys>
+        <VerInfo_Keys>CompanyName=VRAMの魔術師;FileDescription=手描きマーカー;FileVersion=1.0.0.0;InternalName=SYNC_DrawMarker;LegalCopyright=Copyright (c) 2026 VRAMの魔術師;OriginalFilename=SYNC_DrawMarker.aux2;ProductName=SYNC_DrawMarker;ProductVersion=1.0.0</VerInfo_Keys>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1)'!=''">
         <DCC_DebugDCUs>true</DCC_DebugDCUs>
