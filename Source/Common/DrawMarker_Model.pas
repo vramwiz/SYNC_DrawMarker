@@ -25,7 +25,6 @@ type
     RGB: Cardinal;
     Width: Single;
     Opacity: Integer;
-    UsePressure: Boolean;
   end;
 
   TPenSample = record
@@ -70,7 +69,6 @@ begin
   Result.RGB := Colors[Kind];
   Result.Width := Widths[Kind];
   Result.Opacity := Alphas[Kind];
-  Result.UsePressure := Kind = pkBrush;
 end;
 
 function PointCount(const Doc: TMarkerDocument): Integer;
@@ -145,7 +143,6 @@ begin
       Stroke^.Style.RGB := IntegerValue(Entry.GetValue('rgb'), 0, $FFFFFF);
       Stroke^.Style.Width := Number(Entry.GetValue('width'), 1, 512);
       Stroke^.Style.Opacity := IntegerValue(Entry.GetValue('opacity'), 0, 100);
-      Stroke^.Style.UsePressure := IntegerValue(Entry.GetValue('pressure'), 0, 1) <> 0;
       Points := RequiredArray(Entry.GetValue('points'));
       Inc(Total, Points.Count);
       if (Points.Count = 0) or (Points.Count > MaxStrokePoints) or (Total > MaxMarkerPoints) then
@@ -199,10 +196,11 @@ begin
     begin
       if I > 0 then Builder.Append(',');
       Stroke := Doc.Strokes[I];
+      // 旧版の互換用に、サンプル形式の筆圧フラグを出力する。
       Builder.Append('{"input":').Append(Ord(Stroke.Input)).Append(',"pen":').Append(Ord(Stroke.Style.Kind))
         .Append(',"rgb":').Append(Integer(Stroke.Style.RGB)).Append(',"width":')
         .Append(FloatToStr(Stroke.Style.Width, Fmt)).Append(',"opacity":').Append(Stroke.Style.Opacity)
-        .Append(',"pressure":').Append(Ord(Stroke.Style.UsePressure)).Append(',"points":[');
+        .Append(',"pressure":').Append(Ord(Stroke.Input = ikPen)).Append(',"points":[');
       if Stroke.Input = ikPen then
         for J := 0 to High(Stroke.Samples) do
         begin

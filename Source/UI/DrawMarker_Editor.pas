@@ -4,7 +4,7 @@ interface
 
 uses
   Winapi.Windows, Winapi.Messages, System.Types, System.Classes, System.Generics.Collections,
-  Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls, Vcl.Graphics, Vcl.Samples.Spin,
+  Vcl.Forms, Vcl.Controls, Vcl.StdCtrls, Vcl.ExtCtrls, Vcl.Graphics,
   DrawMarker_Model, DrawMarker_Curves, DrawMarker_Renderer, DrawMarker_Capture;
 
 type
@@ -15,7 +15,15 @@ procedure OpenMarkerEditor(OwnerWindow: HWND; const Document: TMarkerDocument;
 
 implementation
 
-uses System.SysUtils, System.Math, System.UITypes, Vcl.Dialogs, Vcl.Menus, AviUtl2FilterTypes;
+uses System.SysUtils, System.Math, System.UITypes, Vcl.Buttons, Vcl.Dialogs, Vcl.Menus,
+  Vcl.Themes, Vcl.Styles, AviUtl2FilterTypes, HorizontalTrackBarControl,
+  ColorPickerHueBar, ColorPickerSVArea, ColorPickerColorMath, MapRakuColorCode;
+
+const
+  MarkerStyleName = 'Windows Modern Dark';
+  ChromeColor = TColor($00282422);
+  CanvasColor = TColor($001A1817);
+  TextColor = TColor($00ECEBE8);
 
 type
   TMarkerEditor = class;
@@ -28,6 +36,27 @@ type
   end;
 
   TDragPart = (dpNone, dpStroke, dpVertex, dpIncoming, dpOutgoing);
+  TMarkerTool = (mtSelect, mtContinuous, mtFreehand);
+
+  TMarkerToolButton = class(TSpeedButton)
+  private
+    procedure RefreshGlyph(PPI: Integer);
+  protected
+    procedure ChangeScale(M, D: Integer; isDpiChange: Boolean); override;
+  end;
+
+  TMarkerColorDock = class(TPanel)
+  private
+    FTitle: TLabel;
+    FHue: TColorPickerHueBar;
+    FArea: TColorPickerSVArea;
+    FSample: TShape;
+    FCode: TEdit;
+  protected
+    procedure AlignControls(AControl: TControl; var Rect: TRect); override;
+  public
+    constructor Create(AOwner: TComponent); override;
+  end;
 
   TMarkerEditor = class(TForm)
   private
@@ -41,25 +70,32 @@ type
     FDoc: TMarkerDocument;
     FPaths: TMarkerPaths;
     FPathsDirty: Boolean;
+    FRenderValid, FPreviewActive, FPreviewFreehand: Boolean;
     FUndo, FRedo: TList<TMarkerDocument>;
     FSelected, FVertex: Integer;
     FDragging: TDragPart;
     FBeforeDrag: TMarkerDocument;
     FDragOrigin: TPointF;
     FDragChanged: Boolean;
-    FSelectMode: Boolean;
+    FTool: TMarkerTool;
     FStyle: TStrokeStyle;
     FPending: TArray<TCurveAnchor>;
-    FPenSamples: TList<TPenSample>;
-    FPenID, FPenStart: Cardinal;
+    FLastCurveClick: TPoint;
+    FLastCurveClickTime: UInt64;
+    FStrokeSamples: TList<TPenSample>;
+    FMouseDrawing: Boolean;
+    FPenID, FStrokeStart: Cardinal;
     FHover: TPointF;
     FHovering: Boolean;
     FSync: Boolean;
-    FUndoButton, FRedoButton, FDeleteButton, FKindButton, FDrawButton,
-      FSelectButton, FColorButton: TButton;
+    FToolButtons: array[TMarkerTool] of TSpeedButton;
+    FUndoItem, FRedoItem, FDeleteItem, FKindItem: TMenuItem;
     FPenPicker: TComboBox;
-    FSize, FOpacity: TSpinEdit;
-    FPressure: TCheckBox;
+    FSize, FOpacity: THorizontalTrackBarControl;
+    FSizeValue, FOpacityValue: TLabel;
+    FColorDock: TMarkerColorDock;
+    FStyleGesture: TControl;
+    FRecordedStyleGesture: Boolean;
     FStatus: TLabel;
     procedure SetStatus;
     procedure SyncControls;
@@ -68,17 +104,32 @@ type
     procedure BeginChange;
     procedure PushUndo(const Before: TMarkerDocument);
     procedure AddStroke(const Stroke: TMarkerStroke);
+    procedure CurveClick(const P: TPoint);
+    procedure CurveHover(const P: TPoint);
     procedure FinishCurve;
+    procedure AddFreehandSample(const P: TPoint; Timestamp: Cardinal; Pressure: Single);
+    procedure FinishFreehand(Cancel: Boolean);
     procedure SelectTool(Sender: TObject);
     procedure UndoClick(Sender: TObject);
     procedure RedoClick(Sender: TObject);
     procedure DeleteClick(Sender: TObject);
     procedure KindClick(Sender: TObject);
-    procedure ColorClick(Sender: TObject);
+    function CanInsertVertex(Segment: Integer; Parameter: Single): Boolean;
+    function InsertVertex(Segment: Integer; Parameter: Single): Boolean;
+    procedure ShowSelectionMenu(const Position: TPoint; Segment: Integer; Parameter: Single);
+    procedure ColorChange(Sender: TObject);
+    procedure ColorCodeExit(Sender: TObject);
+    procedure ColorCodeKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+    procedure SyncColor(Color: Cardinal);
     procedure PenChange(Sender: TObject);
     procedure StyleChange(Sender: TObject);
-    procedure ApplyStyle;
-    procedure SaveClick(Sender: TObject);
+    function CurrentStyle: TStrokeStyle;
+    procedure ApplyStyle(Sender: TObject);
+    procedure StyleMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure StyleMouseUp(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure EditorClose(Sender: TObject; var Action: TCloseAction);
     procedure EditorKey(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure ViewDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
     procedure ViewMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
@@ -88,15 +139,17 @@ type
     procedure AddPenHistory(ID: Cardinal; const Pen: POINTER_PEN_INFO; IncludeHistory: Boolean);
     function ToWorld(X, Y: Integer): TPointF;
     function ToView(const P: TPointF): TPoint;
-    function HitSelectedPoint(X, Y: Integer; out Index: Integer): TDragPart;
+    function HitSelectedPoint(X, Y: Integer; IncludeHandles: Boolean; out Index: Integer): TDragPart;
     procedure DrawView;
     procedure DrawSelection;
+    procedure ComposePreview(const Markers: TRGBAPixels; Width, Height: Integer);
   protected
     procedure CreateParams(var Params: TCreateParams); override;
   public
     constructor CreateEditor(OwnerWindow: HWND; const Document: TMarkerDocument;
       const Background: TMarkerCapture; Save: TMarkerSave);
     destructor Destroy; override;
+    function IsShortCut(var Message: TWMKey): Boolean; override;
   end;
 
 function PromotedMouse: Boolean;
@@ -120,7 +173,11 @@ begin
           Message.Result := 0;
           Exit;
         end;
-      WM_CAPTURECHANGED: FEditor.EndDrag(True);
+      WM_CAPTURECHANGED:
+        begin
+          FEditor.EndDrag(True);
+          if FEditor.FMouseDrawing then FEditor.FinishFreehand(True);
+        end;
       CM_MOUSELEAVE:
         begin
           FEditor.FHovering := False;
@@ -130,37 +187,210 @@ begin
   inherited;
 end;
 
+procedure TMarkerToolButton.RefreshGlyph(PPI: Integer);
+const GlyphSize = 18;
+var GlyphPixels, SavedDC: Integer;
+begin
+  GlyphPixels := MulDiv(GlyphSize, PPI, 96);
+  Glyph.SetSize(GlyphPixels, GlyphPixels);
+  Glyph.TransparentColor := clFuchsia;
+  with Glyph.Canvas do
+  begin
+    Brush.Color := clFuchsia;
+    FillRect(Rect(0, 0, Glyph.Width, Glyph.Height));
+    SavedDC := SaveDC(Handle);
+    try
+      SetMapMode(Handle, MM_ANISOTROPIC);
+      SetWindowExtEx(Handle, GlyphSize, GlyphSize, nil);
+      SetViewportExtEx(Handle, GlyphPixels, GlyphPixels, nil);
+      Pen.Color := StyleServices(Self).GetSystemColor(clBtnText);
+      Brush.Color := Pen.Color;
+      Pen.Width := 1;
+      case TMarkerTool(Tag) of
+        mtSelect:
+          Polygon([Point(4, 2), Point(4, 14), Point(7, 11), Point(10, 16),
+            Point(12, 15), Point(9, 10), Point(14, 10)]);
+        mtContinuous:
+          begin
+            Polyline([Point(3, 13), Point(8, 5), Point(12, 10), Point(15, 3)]);
+            Rectangle(2, 12, 5, 15);
+            Rectangle(7, 4, 10, 7);
+            Rectangle(11, 9, 14, 12);
+            Rectangle(14, 2, 17, 5);
+          end;
+        mtFreehand:
+          begin
+            Pen.Width := 2;
+            PolyBezier([Point(2, 13), Point(9, -8), Point(8, 26), Point(16, 4)]);
+          end;
+      end;
+    finally
+      RestoreDC(Handle, SavedDC);
+    end;
+  end;
+end;
+
+procedure TMarkerToolButton.ChangeScale(M, D: Integer; isDpiChange: Boolean);
+begin
+  inherited;
+  if isDpiChange then RefreshGlyph(M);
+end;
+
+constructor TMarkerColorDock.Create(AOwner: TComponent);
+begin
+  inherited;
+  Width := 188;
+  BevelOuter := bvNone;
+  ParentBackground := False;
+  StyleElements := StyleElements - [seClient];
+  Color := ChromeColor;
+
+  FTitle := TLabel.Create(Self);
+  FTitle.Parent := Self;
+  FTitle.Caption := '色';
+  FTitle.StyleElements := FTitle.StyleElements - [seFont];
+  FHue := TColorPickerHueBar.Create(Self);
+  FHue.Parent := Self;
+  FArea := TColorPickerSVArea.Create(Self);
+  FArea.Parent := Self;
+  FSample := TShape.Create(Self);
+  FSample.Parent := Self;
+  FSample.Pen.Color := TColor($00605B56);
+  FCode := TEdit.Create(Self);
+  FCode.Parent := Self;
+  FCode.AutoSize := False;
+  FCode.MaxLength := 24;
+  FCode.Hint := '#RRGGBB または R,G,B';
+  FCode.ShowHint := True;
+end;
+
+procedure TMarkerColorDock.AlignControls(AControl: TControl; var Rect: TRect);
+var Inset, Gap, HueWidth, CodeHeight, PickerTop, CodeTop, AvailableWidth, Side: Integer;
+begin
+  inherited;
+  if (FCode = nil) or (csDestroying in ComponentState) then Exit;
+  Inset := ScaleValue(12);
+  Gap := ScaleValue(8);
+  HueWidth := ScaleValue(16);
+  CodeHeight := ScaleValue(28);
+  AvailableWidth := ClientWidth - 2 * Inset;
+  FTitle.Left := Inset;
+  FTitle.Top := Gap;
+  PickerTop := FTitle.Top + FTitle.Height + Gap;
+  Side := Max(1, Min(AvailableWidth - HueWidth - Gap,
+    ClientHeight - PickerTop - CodeHeight - 2 * Gap));
+  FArea.SetBounds(Inset, PickerTop, Side, Side);
+  FHue.SetBounds(Inset + Side + Gap, PickerTop, HueWidth, Side);
+  CodeTop := PickerTop + Side + Gap;
+  FSample.SetBounds(Inset, CodeTop, CodeHeight, CodeHeight);
+  FCode.SetBounds(Inset + CodeHeight + Gap, CodeTop,
+    Max(1, AvailableWidth - CodeHeight - Gap), CodeHeight);
+end;
+
 constructor TMarkerEditor.CreateEditor(OwnerWindow: HWND; const Document: TMarkerDocument;
   const Background: TMarkerCapture; Save: TMarkerSave);
-var Bar, Settings, Footer: TPanel; CancelButton, Done: TButton; Kind: TPenKind;
+var
+  Palette, Footer: TPanel;
+  Settings: TFlowPanel;
+  MainMenu: TMainMenu;
+  EditMenu: TMenuItem;
+  Kind: TPenKind;
+  OwnerMonitor: TMonitor;
+  WorkArea: TRect;
+  W, H: Integer;
 
-  function Button(Parent: TWinControl; const Caption: string; X, W: Integer;
-    Action: TNotifyEvent): TButton;
+  procedure ToolButton(Tool: TMarkerTool; const Hint: string);
+  var B: TMarkerToolButton;
   begin
-    Result := TButton.Create(Self);
-    Result.Parent := Parent;
-    Result.SetBounds(X, 6, W, 28);
+    B := TMarkerToolButton.Create(Self);
+    B.Tag := Ord(Tool);
+    B.Parent := Palette;
+    B.SetBounds(8, 8 + Ord(Tool) * 36, 32, 32);
+    B.Flat := True;
+    B.Hint := Hint;
+    B.ShowHint := True;
+    B.GroupIndex := 1;
+    B.OnClick := SelectTool;
+    B.RefreshGlyph(PixelsPerInch);
+    FToolButtons[Tool] := B;
+  end;
+
+  function EditItem(const Caption: string; Key: Word; Shift: TShiftState;
+    Action: TNotifyEvent): TMenuItem;
+  begin
+    Result := TMenuItem.Create(MainMenu);
     Result.Caption := Caption;
+    Result.ShortCut := ShortCut(Key, Shift);
     Result.OnClick := Action;
+    EditMenu.Add(Result);
   end;
 
-  procedure LabelAt(Parent: TWinControl; const Caption: string; X, Y: Integer);
-  var L: TLabel;
+  function ChromePanel(Parent: TWinControl; Alignment: TAlign): TPanel;
   begin
+    Result := TPanel.Create(Self);
+    Result.Parent := Parent;
+    Result.Align := Alignment;
+    Result.BevelOuter := bvNone;
+    Result.ParentBackground := False;
+    Result.StyleElements := Result.StyleElements - [seClient];
+    Result.Color := ChromeColor;
+  end;
+
+  procedure AddSetting(const Caption: string; Control: TControl; ControlWidth: Integer;
+    Readout: TLabel);
+  const RowHeight = 32;
+  var Group: TPanel; L: TLabel;
+  begin
+    Group := ChromePanel(Settings, alNone);
+    Group.Height := RowHeight;
+    Group.AlignWithMargins := True;
+    Group.Margins.SetBounds(0, 0, 12, 8);
+    Group.Constraints.MinHeight := RowHeight;
+    Group.Constraints.MaxHeight := RowHeight;
     L := TLabel.Create(Self);
-    L.Parent := Parent;
+    L.Parent := Group;
     L.Caption := Caption;
-    L.SetBounds(X, Y, 1, 20);
+    L.StyleElements := L.StyleElements - [seFont];
+    L.AlignWithMargins := True;
+    L.Margins.SetBounds(0, 0, 8, 0);
+    L.Layout := tlCenter;
+    L.Align := alLeft;
+    Control.Parent := Group;
+    Control.SetBounds(Group.Width, 0, ControlWidth, Group.Height);
+    if Control is TComboBox then
+    begin
+      Control.AlignWithMargins := True;
+      Control.Margins.SetBounds(0, 4, 0, 0);
+    end;
+    Control.Align := alLeft;
+    if Readout <> nil then
+    begin
+      Readout.Parent := Group;
+      Readout.StyleElements := Readout.StyleElements - [seFont];
+      Readout.AutoSize := False;
+      Readout.SetBounds(Control.BoundsRect.Right, 0, 48, RowHeight);
+      Readout.AlignWithMargins := True;
+      Readout.Margins.SetBounds(4, 0, 0, 0);
+      Readout.Layout := tlCenter;
+      Readout.Align := alLeft;
+    end;
+    Group.AutoSize := True;
   end;
 
-  function Spin(X, Min, Max: Integer): TSpinEdit;
+  function Slider(const Caption: string; Min, Max: Integer; out Readout: TLabel): THorizontalTrackBarControl;
   begin
-    Result := TSpinEdit.Create(Self);
-    Result.Parent := Settings;
-    Result.SetBounds(X, 8, 61, 25);
-    Result.MinValue := Min;
-    Result.MaxValue := Max;
-    Result.OnExit := StyleChange;
+    Result := THorizontalTrackBarControl.Create(Self);
+    Readout := TLabel.Create(Self);
+    AddSetting(Caption, Result, 116, Readout);
+    Result.BackgroundColor := ChromeColor;
+    Result.FillColor := TColor($00D89458);
+    Result.ThumbBorderColor := TextColor;
+    Result.ShowTicks := False;
+    Result.SetRange(Min, Max);
+    Result.WheelChangesPosition := False;
+    Result.OnChange := StyleChange;
+    Result.OnMouseDown := StyleMouseDown;
+    Result.OnMouseUp := StyleMouseUp;
   end;
 
 begin
@@ -175,76 +405,90 @@ begin
   FRenderer := TMarkerRenderer.Create;
   FUndo := TList<TMarkerDocument>.Create;
   FRedo := TList<TMarkerDocument>.Create;
-  FPenSamples := TList<TPenSample>.Create;
+  FStrokeSamples := TList<TPenSample>.Create;
   FSelected := -1;
   FVertex := -1;
+  FTool := mtSelect;
   FStyle := DefaultStyle(pkNormal);
   FStyle.Width := EnsureRange(Round(FStyle.Width * FDoc.Width / 1920), 2, 512);
   Caption := '手描きマーカー';
+  StyleName := MarkerStyleName;
+  Color := ChromeColor;
+  Font.PixelsPerInch := PixelsPerInch;
   Font.Name := 'Yu Gothic UI';
   Font.Size := 10;
+  Font.Color := TextColor;
   BorderStyle := bsSizeable;
-  Position := poScreenCenter;
+  Position := poDesigned;
   ClientWidth := 970;
   ClientHeight := 660;
-  Constraints.MinWidth := 700;
-  Constraints.MinHeight := 430;
+  Constraints.MinWidth := 408;
+  Constraints.MinHeight := 368;
   KeyPreview := True;
   OnKeyDown := EditorKey;
+  OnClose := EditorClose;
   DoubleBuffered := True;
 
-  Bar := TPanel.Create(Self);
-  Bar.Parent := Self;
-  Bar.Align := alTop;
-  Bar.Height := 40;
-  Bar.BevelOuter := bvNone;
-  FDrawButton := Button(Bar, '描画', 12, 78, SelectTool);
-  FSelectButton := Button(Bar, '選択', 94, 78, SelectTool);
-  FUndoButton := Button(Bar, '元に戻す', 194, 96, UndoClick);
-  FRedoButton := Button(Bar, 'やり直す', 294, 96, RedoClick);
-  FDeleteButton := Button(Bar, '削除', 410, 72, DeleteClick);
-  FKindButton := Button(Bar, '頂点の種類', 486, 116, KindClick);
+  MainMenu := TMainMenu.Create(Self);
+  EditMenu := TMenuItem.Create(MainMenu);
+  EditMenu.Caption := '編集(&E)';
+  MainMenu.Items.Add(EditMenu);
+  FUndoItem := EditItem('元に戻す', Ord('Z'), [ssCtrl], UndoClick);
+  FRedoItem := EditItem('やり直す', Ord('Y'), [ssCtrl], RedoClick);
+  FDeleteItem := EditItem('削除', VK_DELETE, [], DeleteClick);
+  FKindItem := EditItem('頂点の種類', Ord('T'), [ssCtrl], KindClick);
+  Menu := MainMenu;
 
-  Settings := TPanel.Create(Self);
+  Settings := TFlowPanel.Create(Self);
   Settings.Parent := Self;
-  Settings.Top := Bar.Height;
   Settings.Align := alTop;
-  Settings.Height := 42;
+  Settings.Height := 46;
+  Settings.AutoSize := True;
   Settings.BevelOuter := bvNone;
+  Settings.ParentBackground := False;
+  Settings.StyleElements := Settings.StyleElements - [seClient];
+  Settings.Color := ChromeColor;
+  Settings.Padding.SetBounds(12, 8, 0, 4);
   FPenPicker := TComboBox.Create(Self);
-  FPenPicker.Parent := Settings;
+  AddSetting('ペン先', FPenPicker, 112, nil);
   FPenPicker.Style := csDropDownList;
-  FPenPicker.SetBounds(12, 8, 138, 25);
   for Kind := Low(TPenKind) to High(TPenKind) do FPenPicker.Items.Add(PenNames[Kind]);
   FPenPicker.OnChange := PenChange;
-  FColorButton := Button(Settings, '色', 160, 100, ColorClick);
-  LabelAt(Settings, '太さ', 274, 10);
-  FSize := Spin(312, 1, 512);
-  LabelAt(Settings, '不透明度 %', 386, 10);
-  FOpacity := Spin(469, 0, 100);
-  FPressure := TCheckBox.Create(Self);
-  FPressure.Parent := Settings;
-  FPressure.SetBounds(544, 8, 130, 26);
-  FPressure.Caption := '筆圧で太さを変える';
-  FPressure.OnClick := StyleChange;
+  FSize := Slider('太さ', 1, 512, FSizeValue);
+  FOpacity := Slider('不透明度', 0, 100, FOpacityValue);
 
-  Footer := TPanel.Create(Self);
-  Footer.Parent := Self;
-  Footer.Align := alBottom;
-  Footer.Height := 46;
-  Footer.BevelOuter := bvNone;
+  Footer := ChromePanel(Self, alBottom);
+  Footer.Height := 36;
+  Footer.Padding.SetBounds(12, 0, 12, 0);
   FStatus := TLabel.Create(Self);
   FStatus.Parent := Footer;
-  FStatus.SetBounds(12, 12, 1, 22);
-  Done := Button(Footer, '反映', ClientWidth - 180, 76, SaveClick);
-  Done.Anchors := [akTop, akRight];
-  CancelButton := Button(Footer, 'キャンセル', ClientWidth - 100, 88, nil);
-  CancelButton.Anchors := [akTop, akRight];
-  CancelButton.ModalResult := mrCancel;
+  FStatus.StyleElements := FStatus.StyleElements - [seFont];
+  FStatus.AutoSize := False;
+  FStatus.Align := alClient;
+  FStatus.Layout := tlCenter;
+  FStatus.WordWrap := True;
+
+  Palette := ChromePanel(Self, alLeft);
+  Palette.Width := 48;
+  ToolButton(mtSelect, '選択');
+  ToolButton(mtContinuous, '連続線');
+  ToolButton(mtFreehand, '自由線');
+
+  FColorDock := TMarkerColorDock.Create(Self);
+  FColorDock.Parent := Self;
+  FColorDock.Align := alRight;
+  FColorDock.FHue.OnChange := ColorChange;
+  FColorDock.FHue.OnMouseDown := StyleMouseDown;
+  FColorDock.FHue.OnMouseUp := StyleMouseUp;
+  FColorDock.FArea.OnChange := ColorChange;
+  FColorDock.FArea.OnMouseDown := StyleMouseDown;
+  FColorDock.FArea.OnMouseUp := StyleMouseUp;
+  FColorDock.FCode.OnExit := ColorCodeExit;
+  FColorDock.FCode.OnKeyDown := ColorCodeKeyDown;
 
   FView := TMarkerCanvas.Create(Self);
   FView.FEditor := Self;
-  FView.ControlStyle := FView.ControlStyle - [csCaptureMouse];
+  FView.ControlStyle := FView.ControlStyle + [csDoubleClicks] - [csCaptureMouse];
   FView.Parent := Self;
   FView.Align := alClient;
   FView.DoubleBuffered := True;
@@ -252,13 +496,23 @@ begin
   FView.OnMouseDown := ViewDown;
   FView.OnMouseMove := ViewMove;
   FView.OnMouseUp := ViewUp;
+  ActiveControl := FView;
   SyncControls;
+
+  OwnerMonitor := Screen.MonitorFromWindow(FOwnerWindow);
+  if OwnerMonitor = nil then OwnerMonitor := Screen.PrimaryMonitor;
+  WorkArea := OwnerMonitor.WorkareaRect;
+  SetBounds(WorkArea.Left, WorkArea.Top, Width, Height);
+  ScaleForPPI(OwnerMonitor.PixelsPerInch);
+  W := Min(Width, WorkArea.Width);
+  H := Min(Height, WorkArea.Height);
+  SetBounds(WorkArea.Left + (WorkArea.Width - W) div 2, WorkArea.Top + (WorkArea.Height - H) div 2, W, H);
 end;
 
 destructor TMarkerEditor.Destroy;
 begin
   if FView <> nil then FView.FEditor := nil;
-  FPenSamples.Free;
+  FStrokeSamples.Free;
   FRedo.Free;
   FUndo.Free;
   FRenderer.Free;
@@ -274,10 +528,11 @@ end;
 
 procedure TMarkerEditor.SetStatus;
 begin
-  if FSelectMode then
-    FStatus.Caption := '線・頂点・ハンドルをドラッグ　Ctrl+クリックで頂点を追加'
-  else
-    FStatus.Caption := 'マウスは左クリックで頂点、右クリックで確定　ペンは手描き';
+  case FTool of
+    mtSelect: FStatus.Caption := '線・頂点・ハンドルをドラッグ　右クリックで頂点の追加・削除';
+    mtContinuous: FStatus.Caption := 'クリックで頂点を追加　終点をダブルクリックで確定';
+    mtFreehand: FStatus.Caption := 'マウスでドラッグ、またはペンで手描き';
+  end;
   if Length(FBackground.Pixels) = 0 then FStatus.Caption := '背景を取得できませんでした。 ' + FStatus.Caption;
 end;
 
@@ -286,24 +541,23 @@ var S: TStrokeStyle;
 begin
   FSync := True;
   try
-    S := FStyle;
-    if FSelectMode and (FSelected >= 0) then S := FDoc.Strokes[FSelected].Style;
+    S := CurrentStyle;
     FPenPicker.ItemIndex := Ord(S.Kind);
-    FColorButton.Caption := '色 #' + IntToHex(S.RGB, 6);
-    FSize.Value := Round(S.Width);
-    FOpacity.Value := S.Opacity;
-    FPressure.Checked := S.UsePressure;
-    FDrawButton.Enabled := FSelectMode;
-    FSelectButton.Enabled := not FSelectMode;
-    FDeleteButton.Enabled := FSelectMode and (FSelected >= 0);
-    FKindButton.Enabled := FDeleteButton.Enabled and (FVertex >= 0);
-    if FKindButton.Enabled then
+    SyncColor(S.RGB);
+    FSize.Position := Round(S.Width);
+    FSizeValue.Caption := IntToStr(FSize.Position) + ' px';
+    FOpacity.Position := S.Opacity;
+    FOpacityValue.Caption := IntToStr(FOpacity.Position) + '%';
+    FToolButtons[FTool].Down := True;
+    FDeleteItem.Enabled := (FTool = mtSelect) and (FSelected >= 0);
+    FKindItem.Enabled := FDeleteItem.Enabled and (FVertex >= 0);
+    if FKindItem.Enabled then
       if FDoc.Strokes[FSelected].Anchors[FVertex].Kind = akSmooth then
-        FKindButton.Caption := '鋭角頂点にする'
-      else FKindButton.Caption := 'ベジェ頂点にする'
-    else FKindButton.Caption := '頂点の種類';
-    FUndoButton.Enabled := (FUndo.Count > 0) or (Length(FPending) > 0);
-    FRedoButton.Enabled := FRedo.Count > 0;
+        FKindItem.Caption := '鋭角頂点にする'
+      else FKindItem.Caption := 'ベジェ頂点にする'
+    else FKindItem.Caption := '頂点の種類';
+    FUndoItem.Enabled := (FUndo.Count > 0) or (Length(FPending) > 0);
+    FRedoItem.Enabled := (FRedo.Count > 0) and (Length(FPending) = 0);
     SetStatus;
   finally
     FSync := False;
@@ -313,6 +567,7 @@ end;
 procedure TMarkerEditor.Changed;
 begin
   FPathsDirty := True;
+  FRenderValid := False;
   SyncControls;
   FView.Invalidate;
 end;
@@ -338,18 +593,70 @@ begin
 end;
 
 procedure TMarkerEditor.AddStroke(const Stroke: TMarkerStroke);
+var Pixels: TRGBAPixels;
 begin
   if Length(FDoc.Strokes) >= MaxMarkerStrokes then Exit;
   if PointCount(FDoc) + Length(Stroke.Anchors) + Length(Stroke.Samples) > MaxMarkerPoints then Exit;
   BeginChange;
   SetLength(FDoc.Strokes, Length(FDoc.Strokes) + 1);
   FDoc.Strokes[High(FDoc.Strokes)] := Stroke;
-  Changed;
+  FPathsDirty := True;
+  if FRenderValid then
+  begin
+    FRenderValid := False;
+    FRenderer.RenderPreview(BuildPath(Stroke, FDoc.Width), (Stroke.Input = ikPen) and FPreviewFreehand);
+    Pixels := FRenderer.FinishPreview(True);
+    ComposePreview(Pixels, FBitmap.Width, FBitmap.Height);
+    FPreviewActive := False;
+    FPreviewFreehand := False;
+    FRenderValid := True;
+  end;
+  SyncControls;
+  FView.Invalidate;
+end;
+
+procedure TMarkerEditor.CurveClick(const P: TPoint);
+var NowTicks: UInt64; Radius: Integer; Position: TPointF;
+begin
+  if not FContent.Contains(P) then
+  begin
+    FLastCurveClickTime := 0;
+    Exit;
+  end;
+  NowTicks := GetTickCount64;
+  Radius := MulDiv(6, FView.CurrentPPI, 96);
+  if (FLastCurveClickTime <> 0) and (NowTicks - FLastCurveClickTime <= GetDoubleClickTime)
+    and (Sqr(P.X - FLastCurveClick.X) + Sqr(P.Y - FLastCurveClick.Y) <= Sqr(Radius)) then
+  begin
+    FLastCurveClickTime := 0;
+    if Length(FPending) >= 2 then FinishCurve;
+    Exit;
+  end;
+  FLastCurveClick := P;
+  FLastCurveClickTime := NowTicks;
+  if Length(FPending) >= MaxStrokePoints then Exit;
+  Position := ToWorld(P.X, P.Y);
+  if (Length(FPending) > 0) and (FPending[High(FPending)].Position = Position) then Exit;
+  SetLength(FPending, Length(FPending) + 1);
+  FPending[High(FPending)].Position := Position;
+  FHovering := False;
+  SyncControls;
+  FView.Invalidate;
+end;
+
+procedure TMarkerEditor.CurveHover(const P: TPoint);
+begin
+  if Length(FPending) = 0 then Exit;
+  FHover := ToWorld(P.X, P.Y);
+  FHovering := FContent.Contains(P);
+  FView.Invalidate;
 end;
 
 procedure TMarkerEditor.FinishCurve;
 var Stroke: TMarkerStroke; I: Integer;
 begin
+  FLastCurveClickTime := 0;
+  FHovering := False;
   if Length(FPending) = 0 then Exit;
   Stroke.Style := FStyle;
   Stroke.Input := ikMouse;
@@ -362,10 +669,14 @@ begin
 end;
 
 procedure TMarkerEditor.SelectTool(Sender: TObject);
+var Tool: TMarkerTool;
 begin
-  if Sender = FSelectButton then FinishCurve;
-  FSelectMode := Sender = FSelectButton;
-  if not FSelectMode then
+  Tool := TMarkerTool(TSpeedButton(Sender).Tag);
+  if Tool = FTool then Exit;
+  FinishCurve;
+  FinishFreehand(True);
+  FTool := Tool;
+  if FTool <> mtSelect then
   begin
     FSelected := -1;
     FVertex := -1;
@@ -376,9 +687,12 @@ end;
 
 procedure TMarkerEditor.UndoClick(Sender: TObject);
 begin
+  FStyleGesture := nil;
+  EndDrag(False);
   if Length(FPending) > 0 then
   begin
     SetLength(FPending, Length(FPending) - 1);
+    FLastCurveClickTime := 0;
     SyncControls;
     FView.Invalidate;
     Exit;
@@ -394,6 +708,8 @@ end;
 
 procedure TMarkerEditor.RedoClick(Sender: TObject);
 begin
+  FStyleGesture := nil;
+  EndDrag(False);
   if (FRedo.Count = 0) or (Length(FPending) > 0) then Exit;
   FUndo.Add(FDoc);
   FDoc := FRedo.Last;
@@ -406,7 +722,8 @@ end;
 procedure TMarkerEditor.DeleteClick(Sender: TObject);
 var I: Integer; Stroke: ^TMarkerStroke;
 begin
-  if not FSelectMode or (FSelected < 0) then Exit;
+  if (FTool <> mtSelect) or (FSelected < 0) then Exit;
+  EndDrag(False);
   BeginChange;
   Stroke := @FDoc.Strokes[FSelected];
   if (FVertex >= 0) and (Length(Stroke^.Anchors) > 1) then
@@ -428,7 +745,8 @@ end;
 procedure TMarkerEditor.KindClick(Sender: TObject);
 var Stroke: ^TMarkerStroke; Kind: DrawMarker_Model.TAnchorKind;
 begin
-  if not FSelectMode or (FVertex < 0) then Exit;
+  if (FTool <> mtSelect) or (FVertex < 0) then Exit;
+  EndDrag(False);
   BeginChange;
   Stroke := @FDoc.Strokes[FSelected];
   Stroke^.Anchors := Copy(Stroke^.Anchors);
@@ -437,18 +755,95 @@ begin
   Changed;
 end;
 
-procedure TMarkerEditor.ApplyStyle;
+function TMarkerEditor.CanInsertVertex(Segment: Integer; Parameter: Single): Boolean;
+begin
+  Result := (FSelected >= 0) and (FDoc.Strokes[FSelected].Input = ikMouse) and
+    (Segment >= 0) and (Segment < High(FDoc.Strokes[FSelected].Anchors)) and
+    (Parameter > 0.001) and (Parameter < 0.999) and
+    (Length(FDoc.Strokes[FSelected].Anchors) < MaxStrokePoints) and
+    (PointCount(FDoc) < MaxMarkerPoints);
+end;
+
+function TMarkerEditor.InsertVertex(Segment: Integer; Parameter: Single): Boolean;
+begin
+  Result := CanInsertVertex(Segment, Parameter);
+  if not Result then Exit;
+  BeginChange;
+  FDoc.Strokes[FSelected].Anchors := Copy(FDoc.Strokes[FSelected].Anchors);
+  SplitCurve(FDoc.Strokes[FSelected].Anchors, Segment, Parameter);
+  FVertex := Segment + 1;
+  Changed;
+end;
+
+procedure TMarkerEditor.ShowSelectionMenu(const Position: TPoint; Segment: Integer; Parameter: Single);
+const
+  DeleteCommand = 1;
+  InsertCommand = 2;
+  KindCommand = 3;
+var Popup: HMENU; ScreenPosition: TPoint;
+begin
+  Popup := CreatePopupMenu;
+  if Popup = 0 then Exit;
+  try
+    AppendMenu(Popup, MF_STRING, DeleteCommand, '削除');
+    if FVertex >= 0 then
+      AppendMenu(Popup, MF_STRING, KindCommand, PChar(FKindItem.Caption))
+    else if CanInsertVertex(Segment, Parameter) then
+      AppendMenu(Popup, MF_STRING, InsertCommand, '頂点を追加');
+    ScreenPosition := FView.ClientToScreen(Position);
+    case Integer(TrackPopupMenu(Popup, TPM_RIGHTBUTTON or TPM_RETURNCMD or TPM_NONOTIFY,
+      ScreenPosition.X, ScreenPosition.Y, 0, FView.Handle, nil)) of
+      DeleteCommand: DeleteClick(nil);
+      InsertCommand: InsertVertex(Segment, Parameter);
+      KindCommand: KindClick(nil);
+    end;
+  finally
+    DestroyMenu(Popup);
+  end;
+end;
+
+function TMarkerEditor.CurrentStyle: TStrokeStyle;
+begin
+  if (FTool = mtSelect) and (FSelected >= 0) then Exit(FDoc.Strokes[FSelected].Style);
+  Result := FStyle;
+end;
+
+procedure TMarkerEditor.ApplyStyle(Sender: TObject);
 var S: TStrokeStyle;
 begin
-  if FSelectMode and (FSelected >= 0) then
+  if (FTool = mtSelect) and (FSelected >= 0) then
   begin
     S := FDoc.Strokes[FSelected].Style;
     if (S.Kind = FStyle.Kind) and (S.RGB = FStyle.RGB) and (S.Width = FStyle.Width) and
-      (S.Opacity = FStyle.Opacity) and (S.UsePressure = FStyle.UsePressure) then Exit;
-    BeginChange;
+      (S.Opacity = FStyle.Opacity) then Exit;
+    if (FStyleGesture = Sender) and (GetCaptureControl = FStyleGesture) then
+    begin
+      if not FRecordedStyleGesture then
+      begin
+        BeginChange;
+        FRecordedStyleGesture := True;
+      end;
+    end
+    else BeginChange;
     FDoc.Strokes[FSelected].Style := FStyle;
   end;
   Changed;
+end;
+
+procedure TMarkerEditor.StyleMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  if Button <> mbLeft then Exit;
+  if ((Sender = FColorDock.FArea) or (Sender = FColorDock.FHue)) and (ActiveControl = FColorDock.FCode) then
+    FView.SetFocus;
+  FStyleGesture := TControl(Sender);
+  FRecordedStyleGesture := False;
+end;
+
+procedure TMarkerEditor.StyleMouseUp(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  if (Button = mbLeft) and (Sender = FStyleGesture) then FStyleGesture := nil;
 end;
 
 procedure TMarkerEditor.PenChange(Sender: TObject);
@@ -456,62 +851,111 @@ begin
   if FSync or (FPenPicker.ItemIndex < 0) then Exit;
   FStyle := DefaultStyle(TPenKind(FPenPicker.ItemIndex));
   FStyle.Width := EnsureRange(Round(FStyle.Width * FDoc.Width / 1920), 2, 512);
-  ApplyStyle;
+  ApplyStyle(Sender);
 end;
 
 procedure TMarkerEditor.StyleChange(Sender: TObject);
 begin
   if FSync then Exit;
-  if FSelectMode and (FSelected >= 0) then FStyle := FDoc.Strokes[FSelected].Style;
-  FStyle.Width := EnsureRange(FSize.Value, 1, 512);
-  FStyle.Opacity := EnsureRange(FOpacity.Value, 0, 100);
-  FStyle.UsePressure := FPressure.Checked;
-  ApplyStyle;
+  FStyle := CurrentStyle;
+  if Sender = FSize then FStyle.Width := FSize.Position
+  else FStyle.Opacity := FOpacity.Position;
+  ApplyStyle(Sender);
 end;
 
-procedure TMarkerEditor.ColorClick(Sender: TObject);
-var D: TColorDialog; C: Cardinal;
+procedure TMarkerEditor.SyncColor(Color: Cardinal);
+var Sample: TColor; Hue, Saturation, Value: Double;
 begin
-  if FSelectMode and (FSelected >= 0) then FStyle := FDoc.Strokes[FSelected].Style;
-  D := TColorDialog.Create(Self);
-  try
-    C := FStyle.RGB;
-    D.Color := RGB(C shr 16, (C shr 8) and 255, C and 255);
-    if D.Execute then
-    begin
-      C := ColorToRGB(D.Color);
-      FStyle.RGB := (Cardinal(GetRValue(C)) shl 16) or
-        (Cardinal(GetGValue(C)) shl 8) or GetBValue(C);
-      ApplyStyle;
-    end;
-  finally
-    D.Free;
+  Sample := RGB(Color shr 16, (Color shr 8) and 255, Color and 255);
+  if FColorDock.FArea.Color <> Sample then
+  begin
+    ColorToHsv(Sample, Hue, Saturation, Value);
+    if Saturation > 0 then FColorDock.FHue.Color := HsvToColor(Hue, 1, 1);
+    FColorDock.FArea.BaseColor := FColorDock.FHue.Color;
+    FColorDock.FArea.Color := Sample;
   end;
+  FColorDock.FSample.Brush.Color := Sample;
+  FColorDock.FCode.Text := '#' + IntToHex(Color, 6);
 end;
 
-procedure TMarkerEditor.SaveClick(Sender: TObject);
+procedure TMarkerEditor.ColorChange(Sender: TObject);
+var Saturation, Value: Double; Sample: Cardinal;
 begin
-  FinishCurve;
+  if FSync then Exit;
+  if Sender = FColorDock.FHue then
+  begin
+    ColorToSv(FColorDock.FArea.Color, Saturation, Value);
+    FColorDock.FArea.BaseColor := FColorDock.FHue.Color;
+    FColorDock.FArea.Color := HsvToColor(ColorHue(FColorDock.FHue.Color), Saturation, Value);
+  end;
+  Sample := ColorToRGB(FColorDock.FArea.Color);
+  FStyle := CurrentStyle;
+  FStyle.RGB := (Cardinal(GetRValue(Sample)) shl 16) or
+    (Cardinal(GetGValue(Sample)) shl 8) or GetBValue(Sample);
+  ApplyStyle(Sender);
+end;
+
+procedure TMarkerEditor.ColorCodeExit(Sender: TObject);
+var Sample: TColor;
+begin
+  if FSync then Exit;
+  if TryParseColorCode(FColorDock.FCode.Text, Sample) then
+  begin
+    FStyle := CurrentStyle;
+    FStyle.RGB := (Cardinal(GetRValue(Sample)) shl 16) or
+      (Cardinal(GetGValue(Sample)) shl 8) or GetBValue(Sample);
+    ApplyStyle(Sender);
+  end;
+  SyncColor(CurrentStyle.RGB);
+end;
+
+procedure TMarkerEditor.ColorCodeKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+begin
+  case Key of
+    VK_RETURN: ColorCodeExit(Sender);
+    VK_ESCAPE: SyncColor(CurrentStyle.RGB);
+  else
+    Exit;
+  end;
+  Key := 0;
+end;
+
+procedure TMarkerEditor.EditorClose(Sender: TObject; var Action: TCloseAction);
+begin
   try
-    if FSave(WriteDocument(FDoc)) then ModalResult := mrOK;
+    if ActiveControl = FColorDock.FCode then ColorCodeExit(FColorDock.FCode);
+    EndDrag(False);
+    FinishFreehand(False);
+    FinishCurve;
+    if not FSave(WriteDocument(FDoc)) then Action := caNone;
   except
-    on E: Exception do MessageDlg(E.Message, mtError, [mbOK], 0);
+    on E: Exception do
+    begin
+      Action := caNone;
+      MessageDlg(E.Message, mtError, [mbOK], 0);
+    end;
   end;
+end;
+
+function TMarkerEditor.IsShortCut(var Message: TWMKey): Boolean;
+begin
+  // 数値欄にフォーカスがある場合は文字の削除を優先する。
+  if (Message.CharCode = VK_DELETE) and (ActiveControl <> FView) then Exit(False);
+  Result := inherited IsShortCut(Message);
 end;
 
 procedure TMarkerEditor.EditorKey(Sender: TObject; var Key: Word; Shift: TShiftState);
 begin
-  if (ssCtrl in Shift) and (Key = Ord('Z')) then
-  begin
-    if ssShift in Shift then RedoClick(nil) else UndoClick(nil);
-  end
-  else if (ssCtrl in Shift) and (Key = Ord('Y')) then RedoClick(nil)
-  else if (Key = VK_DELETE) and (ActiveControl = FView) then DeleteClick(nil)
+  if (ActiveControl = FColorDock.FCode) and (Key in [VK_RETURN, VK_ESCAPE]) then Exit;
+  if (Shift = [ssCtrl, ssShift]) and (Key = Ord('Z')) then RedoClick(nil)
   else if (Key = VK_RETURN) and (Length(FPending) > 0) then FinishCurve
   else if (Key = VK_ESCAPE) and (FDragging <> dpNone) then EndDrag(True)
+  else if (Key = VK_ESCAPE) and (FMouseDrawing or (FPenID <> 0)) then FinishFreehand(True)
   else if (Key = VK_ESCAPE) and (Length(FPending) > 0) then
   begin
     FPending := nil;
+    FLastCurveClickTime := 0;
+    FHovering := False;
     SyncControls;
     FView.Invalidate;
   end
@@ -531,24 +975,26 @@ begin
     FContent.Top + Round(P.Y * FContent.Height / FDoc.Height));
 end;
 
-function TMarkerEditor.HitSelectedPoint(X, Y: Integer; out Index: Integer): TDragPart;
-var A: TCurveAnchor; P: TPoint; I: Integer;
+function TMarkerEditor.HitSelectedPoint(X, Y: Integer; IncludeHandles: Boolean;
+  out Index: Integer): TDragPart;
+var A: TCurveAnchor; P: TPoint; I, Radius: Integer;
   function Near(const Pos: TPointF): Boolean;
   begin
     P := ToView(Pos);
-    Result := (Abs(P.X - X) <= 7) and (Abs(P.Y - Y) <= 7);
+    Result := (Abs(P.X - X) <= Radius) and (Abs(P.Y - Y) <= Radius);
   end;
 begin
   Result := dpNone;
   Index := -1;
   if FSelected < 0 then Exit;
+  Radius := MulDiv(7, FView.CurrentPPI, 96);
   for I := 0 to High(FDoc.Strokes[FSelected].Anchors) do
     if Near(FDoc.Strokes[FSelected].Anchors[I].Position) then
     begin
       Index := I;
       Exit(dpVertex);
     end;
-  if FVertex < 0 then Exit;
+  if not IncludeHandles or (FVertex < 0) then Exit;
   A := FDoc.Strokes[FSelected].Anchors[FVertex];
   Index := FVertex;
   if (FVertex > 0) and Near(A.Position + A.InHandle) then Exit(dpIncoming);
@@ -559,43 +1005,45 @@ end;
 procedure TMarkerEditor.ViewDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var P: TPointF; I, Segment, Hit, HitSegment, Index: Integer; T, HitT, Limit: Single;
-  Popup: TPopupMenu; MenuItem: TMenuItem;
+  InsertWithClick: Boolean;
 begin
-  if not FSelectMode and (PromotedMouse or (FPenID <> 0)) then Exit;
+  if (FTool <> mtSelect) and (PromotedMouse or (FPenID <> 0)) then Exit;
   FView.SetFocus;
-  if not FSelectMode and (Button = mbRight) then
+  if FTool = mtContinuous then
   begin
-    FinishCurve;
+    if Button = mbLeft then CurveClick(Point(X, Y)) else FLastCurveClickTime := 0;
     Exit;
   end;
   if not FContent.Contains(Point(X, Y)) then Exit;
-  P := ToWorld(X, Y);
-  if not FSelectMode then
+  if FTool = mtFreehand then
   begin
-    if (Button = mbLeft) and (Length(FPending) < MaxStrokePoints) then
+    if (Button = mbLeft) and not FMouseDrawing then
     begin
-      if (Length(FPending) > 0) and (Magnitude(FPending[High(FPending)].Position - P) < 0.01) then Exit;
-      SetLength(FPending, Length(FPending) + 1);
-      FPending[High(FPending)].Position := P;
-      SyncControls;
+      SetCapture(FView.Handle);
+      FMouseDrawing := True;
+      FStrokeStart := GetTickCount;
+      AddFreehandSample(Point(X, Y), FStrokeStart, 1);
       FView.Invalidate;
     end;
     Exit;
   end;
   if not (Button in [mbLeft, mbRight]) then Exit;
-  FDragging := dpNone;
-  if not (ssCtrl in Shift) then FDragging := HitSelectedPoint(X, Y, Index);
+  P := ToWorld(X, Y);
+  EndDrag(False);
+  InsertWithClick := (Button = mbLeft) and (ssCtrl in Shift);
+  HitSegment := -1;
+  HitT := 0;
+  if not InsertWithClick then FDragging := HitSelectedPoint(X, Y, Button = mbLeft, Index);
   if FDragging <> dpNone then FVertex := Index
   else
   begin
     EnsurePaths;
     Hit := -1;
-    HitSegment := -1;
-    HitT := 0;
     for I := High(FPaths) downto 0 do
     begin
-      Limit := Max(8, FPaths[I].Style.Width * Min(FContent.Width / FDoc.Width,
-        FContent.Height / FDoc.Height) / 2 + 4);
+      Limit := Max(MulDiv(8, FView.CurrentPPI, 96), FPaths[I].Style.Width *
+        Min(FContent.Width / FDoc.Width, FContent.Height / FDoc.Height) / 2 +
+        MulDiv(4, FView.CurrentPPI, 96));
       if HitPath(FPaths[I], P, FContent.Width / FDoc.Width,
         FContent.Height / FDoc.Height, Limit, Segment, T) then
       begin
@@ -609,18 +1057,10 @@ begin
     FVertex := -1;
     if Hit >= 0 then
     begin
-      if (ssCtrl in Shift) and (Button = mbLeft) and (FDoc.Strokes[Hit].Input = ikMouse)
-        and (HitSegment >= 0) and (HitT > 0.001) and (HitT < 0.999)
-        and (Length(FDoc.Strokes[Hit].Anchors) < MaxStrokePoints) and (PointCount(FDoc) < MaxMarkerPoints) then
-      begin
-        BeginChange;
-        FDoc.Strokes[Hit].Anchors := Copy(FDoc.Strokes[Hit].Anchors);
-        SplitCurve(FDoc.Strokes[Hit].Anchors, HitSegment, HitT);
-        FVertex := HitSegment + 1;
-        Changed;
-        Exit;
-      end;
-      FDragging := dpStroke;
+      if InsertWithClick then
+        if InsertVertex(HitSegment, HitT) then Exit;
+      if not InsertWithClick then FDragging := HitSelectedPoint(X, Y, False, FVertex);
+      if FDragging = dpNone then FDragging := dpStroke;
     end;
   end;
   SyncControls;
@@ -628,23 +1068,7 @@ begin
   if (Button = mbRight) and (FSelected >= 0) then
   begin
     FDragging := dpNone;
-    Popup := TPopupMenu.Create(Self);
-    try
-      MenuItem := TMenuItem.Create(Popup);
-      if FVertex >= 0 then MenuItem.Caption := '頂点を削除' else MenuItem.Caption := '一画を削除';
-      MenuItem.OnClick := DeleteClick;
-      Popup.Items.Add(MenuItem);
-      if FVertex >= 0 then
-      begin
-        MenuItem := TMenuItem.Create(Popup);
-        MenuItem.Caption := FKindButton.Caption;
-        MenuItem.OnClick := KindClick;
-        Popup.Items.Add(MenuItem);
-      end;
-      with FView.ClientToScreen(Point(X, Y)) do Popup.Popup(X, Y);
-    finally
-      Popup.Free;
-    end;
+    ShowSelectionMenu(Point(X, Y), HitSegment, HitT);
   end
   else if (Button = mbLeft) and (FDragging <> dpNone) then
   begin
@@ -658,12 +1082,15 @@ end;
 procedure TMarkerEditor.ViewMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
 var P, Offset: TPointF; Stroke: ^TMarkerStroke; Original: TMarkerStroke; I: Integer;
 begin
-  if not FSelectMode then
+  if FTool <> mtSelect then
   begin
-    if PromotedMouse or (Length(FPending) = 0) then Exit;
-    FHover := ToWorld(X, Y);
-    FHovering := FContent.Contains(Point(X, Y));
-    FView.Invalidate;
+    if PromotedMouse then Exit;
+    if FTool = mtContinuous then CurveHover(Point(X, Y))
+    else if FMouseDrawing then
+    begin
+      AddFreehandSample(Point(X, Y), GetTickCount, 1);
+      FView.Invalidate;
+    end;
     Exit;
   end;
   if (FDragging = dpNone) or (GetCapture <> FView.Handle) then Exit;
@@ -692,13 +1119,18 @@ begin
     dpOutgoing: MoveHandle(Stroke^.Anchors[FVertex], False, P);
   end;
   FPathsDirty := True;
+  FRenderValid := False;
   FView.Invalidate;
 end;
 
 procedure TMarkerEditor.ViewUp(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 begin
-  if Button = mbLeft then EndDrag(False);
+  if (Button = mbLeft) and FMouseDrawing and not PromotedMouse then
+  begin
+    AddFreehandSample(Point(X, Y), GetTickCount, 1);
+    FinishFreehand(False);
+  end;
 end;
 
 procedure TMarkerEditor.EndDrag(Cancel: Boolean);
@@ -715,29 +1147,57 @@ begin
   FBeforeDrag := Default(TMarkerDocument);
 end;
 
+procedure TMarkerEditor.AddFreehandSample(const P: TPoint; Timestamp: Cardinal; Pressure: Single);
+var Sample, Previous: TPenSample; Elapsed: UInt64;
+begin
+  if FStrokeSamples.Count >= MaxStrokePoints then Exit;
+  Elapsed := (UInt64(Timestamp) + UInt64($100000000) - FStrokeStart) and UInt64($FFFFFFFF);
+  if Elapsed > 86400000 then Exit;
+  Sample.Position := ToWorld(P.X, P.Y);
+  Sample.Milliseconds := Integer(Elapsed);
+  Sample.Pressure := Pressure;
+  if FStrokeSamples.Count > 0 then
+  begin
+    Previous := FStrokeSamples.Last;
+    if Sample.Milliseconds < Previous.Milliseconds then Exit;
+    if (Sample.Milliseconds = Previous.Milliseconds) and (Sample.Position = Previous.Position)
+      and (Sample.Pressure = Previous.Pressure) then Exit;
+  end;
+  FStrokeSamples.Add(Sample);
+end;
+
+procedure TMarkerEditor.FinishFreehand(Cancel: Boolean);
+var Stroke: TMarkerStroke; MouseDrawing: Boolean;
+begin
+  if not FMouseDrawing and (FPenID = 0) then Exit;
+  MouseDrawing := FMouseDrawing;
+  FMouseDrawing := False;
+  FPenID := 0;
+  if MouseDrawing and (GetCapture = FView.Handle) then ReleaseCapture;
+  if not Cancel and (FStrokeSamples.Count > 0) then
+  begin
+    Stroke.Input := ikPen; // 既存のサンプル形式をマウスとペンで共有する。
+    Stroke.Style := FStyle;
+    Stroke.Samples := FStrokeSamples.ToArray;
+    FStrokeSamples.Clear;
+    AddStroke(Stroke);
+  end
+  else FStrokeSamples.Clear;
+  FPreviewFreehand := False;
+  FView.Invalidate;
+end;
+
 procedure TMarkerEditor.AddPenHistory(ID: Cardinal; const Pen: POINTER_PEN_INFO;
   IncludeHistory: Boolean);
 var History: TArray<POINTER_PEN_INFO>; Count: Cardinal; I: Integer;
   procedure Append(const Info: POINTER_PEN_INFO);
-  var Sample: TPenSample; P: TPoint; T: UInt64;
+  var Pressure: Single;
   begin
-    if FPenSamples.Count >= MaxStrokePoints then Exit;
-    T := (UInt64(Info.pointerInfo.dwTime) + UInt64($100000000) - FPenStart) and UInt64($FFFFFFFF);
-    if T > 86400000 then Exit;
-    P := FView.ScreenToClient(Info.pointerInfo.ptPixelLocation);
-    Sample.Position := ToWorld(P.X, P.Y);
-    Sample.Milliseconds := Integer(T);
-    Sample.Pressure := 1;
+    Pressure := 1;
     if (Info.penMask and PEN_MASK_PRESSURE) <> 0 then
-      Sample.Pressure := Min(1.0, Info.pressure / 1024);
-    if FPenSamples.Count > 0 then
-    begin
-      if Sample.Milliseconds < FPenSamples.Last.Milliseconds then Exit;
-      if (Sample.Milliseconds = FPenSamples.Last.Milliseconds) and
-        (Sample.Position = FPenSamples.Last.Position) and
-        (Sample.Pressure = FPenSamples.Last.Pressure) then Exit;
-    end;
-    FPenSamples.Add(Sample);
+      Pressure := Min(1.0, Info.pressure / 1024);
+    AddFreehandSample(FView.ScreenToClient(Info.pointerInfo.ptPixelLocation),
+      Info.pointerInfo.dwTime, Pressure);
   end;
 begin
   Count := Pen.pointerInfo.historyCount;
@@ -754,54 +1214,52 @@ begin
 end;
 
 function TMarkerEditor.HandlePointer(const Msg: TMessage): Boolean;
-var ID: Cardinal; Pen: POINTER_PEN_INFO; P: TPoint; Stroke: TMarkerStroke;
+var ID: Cardinal; Pen: POINTER_PEN_INFO; P: TPoint;
 begin
   Result := False;
-  if FSelectMode then Exit;
+  if FTool = mtSelect then Exit;
   ID := LoWord(Msg.WParam);
   if Msg.Msg = WM_POINTERCAPTURECHANGED then
   begin
-    if ID = FPenID then
+    if (FPenID <> 0) and (ID = FPenID) then
     begin
-      FPenID := 0;
-      FPenSamples.Clear;
-      FView.Invalidate;
+      FinishFreehand(True);
       Result := True;
     end;
     Exit;
   end;
   if not GetPointerPenInfo(ID, @Pen) then Exit;
   Result := True;
+  P := FView.ScreenToClient(Pen.pointerInfo.ptPixelLocation);
+  if FTool = mtContinuous then
+  begin
+    case Msg.Msg of
+      WM_POINTERDOWN:
+        begin
+          FView.SetFocus;
+          CurveClick(P);
+        end;
+      WM_POINTERUPDATE: CurveHover(P);
+    end;
+    Exit;
+  end;
   if Msg.Msg = WM_POINTERDOWN then
   begin
-    if FPenID <> 0 then Exit;
-    P := FView.ScreenToClient(Pen.pointerInfo.ptPixelLocation);
-    if not FContent.Contains(P) then Exit;
-    FinishCurve;
+    if (FPenID <> 0) or FMouseDrawing or not FContent.Contains(P) then Exit;
     FView.SetFocus;
     FPenID := ID;
-    FPenStart := Pen.pointerInfo.dwTime;
-    FPenSamples.Clear;
+    FStrokeStart := Pen.pointerInfo.dwTime;
   end;
   if ID <> FPenID then Exit;
   AddPenHistory(ID, Pen, Msg.Msg <> WM_POINTERDOWN);
-  if Msg.Msg = WM_POINTERUP then
-  begin
-    FPenID := 0;
-    Stroke.Input := ikPen;
-    Stroke.Style := FStyle;
-    Stroke.Samples := FPenSamples.ToArray;
-    FPenSamples.Clear;
-    if Length(Stroke.Samples) > 0 then AddStroke(Stroke);
-  end;
-  FView.Invalidate;
+  if Msg.Msg = WM_POINTERUP then FinishFreehand(False) else FView.Invalidate;
 end;
 
 procedure TMarkerEditor.DrawSelection;
 var
   A: TCurveAnchor;
   P, H: TPoint;
-  I: Integer;
+  I, HandleRadius, VertexRadius: Integer;
   Path: TMarkerPath;
   C: TCanvas;
   procedure Handle(const Offset: TPointF);
@@ -809,10 +1267,13 @@ var
     H := ToView(A.Position + Offset);
     C.MoveTo(P.X, P.Y);
     C.LineTo(H.X, H.Y);
-    C.Ellipse(H.X - 4, H.Y - 4, H.X + 5, H.Y + 5);
+    C.Ellipse(H.X - HandleRadius, H.Y - HandleRadius,
+      H.X + HandleRadius + 1, H.Y + HandleRadius + 1);
   end;
 begin
-  if not FSelectMode or (FSelected < 0) then Exit;
+  if (FTool <> mtSelect) or (FSelected < 0) then Exit;
+  HandleRadius := MulDiv(4, FView.CurrentPPI, 96);
+  VertexRadius := MulDiv(5, FView.CurrentPPI, 96);
   C := FView.Canvas;
   C.Pen.Color := clWhite;
   C.Pen.Style := psDot;
@@ -836,34 +1297,35 @@ begin
       if I > 0 then Handle(A.InHandle);
       if I < High(FDoc.Strokes[FSelected].Anchors) then Handle(A.OutHandle);
     end;
-    if A.Kind = akSmooth then C.Ellipse(P.X - 5, P.Y - 5, P.X + 6, P.Y + 6)
-    else C.Rectangle(P.X - 5, P.Y - 5, P.X + 6, P.Y + 6);
+    if A.Kind = akSmooth then
+      C.Ellipse(P.X - VertexRadius, P.Y - VertexRadius, P.X + VertexRadius + 1, P.Y + VertexRadius + 1)
+    else
+      C.Rectangle(P.X - VertexRadius, P.Y - VertexRadius, P.X + VertexRadius + 1, P.Y + VertexRadius + 1);
   end;
 end;
 
-procedure ComposeMarkerPreview(Bitmap: TBitmap; const Markers: TRGBAPixels;
-  const Background: TMarkerCapture; Width, Height: Integer);
+procedure TMarkerEditor.ComposePreview(const Markers: TRGBAPixels; Width, Height: Integer);
 var
   X, Y, I, J, K, Alpha, BackgroundAlpha, Base: Integer;
   Fore, Back: TPIXEL_RGBA;
   Line: PCardinal;
   R, G, B: Integer;
 begin
-  if (Width <> Bitmap.Width) or (Height <> Bitmap.Height) then Bitmap.SetSize(Width, Height);
+  if (Width <> FBitmap.Width) or (Height <> FBitmap.Height) then FBitmap.SetSize(Width, Height);
   I := 0;
   for Y := 0 to Height - 1 do
   begin
     // VCL は DIB の向きを補正し、ScanLine[0] を表示上の先頭行として返す。
-    Line := Bitmap.ScanLine[Y];
-    J := (Y * Background.Height div Height) * Background.Width;
+    Line := FBitmap.ScanLine[Y];
+    J := (Y * FBackground.Height div Height) * FBackground.Width;
     for X := 0 to Width - 1 do
     begin
       Base := 47 + ((X div 16 + Y div 16) and 1) * 18;
       Back := Default(TPIXEL_RGBA);
-      if Length(Background.Pixels) > 0 then
+      if Length(FBackground.Pixels) > 0 then
       begin
-        K := J + X * Background.Width div Width;
-        Back := Background.Pixels[K];
+        K := J + X * FBackground.Width div Width;
+        Back := FBackground.Pixels[K];
       end;
       Fore := Markers[I];
       Inc(I);
@@ -881,15 +1343,20 @@ end;
 
 procedure TMarkerEditor.DrawView;
 var
-  W, H, FitWidth, FitHeight, I: Integer;
+  W, H, FitWidth, FitHeight, I, Margin: Integer;
   Scale: Double;
-  DrawPaths: TMarkerPaths;
   Temp: TMarkerStroke;
   Pixels: TRGBAPixels;
+  Preview: Boolean;
 begin
-  FView.Canvas.Brush.Color := $0024201E;
+  FView.Canvas.Brush.Color := CanvasColor;
   FView.Canvas.FillRect(FView.ClientRect);
-  if (FView.Width < 30) or (FView.Height < 30) then Exit;
+  Margin := MulDiv(12, FView.CurrentPPI, 96);
+  if (FView.Width <= 2 * Margin) or (FView.Height <= 2 * Margin) then
+  begin
+    FContent := TRect.Empty;
+    Exit;
+  end;
   FitWidth := FDoc.Width;
   FitHeight := FDoc.Height;
   if Length(FBackground.Pixels) > 0 then
@@ -897,51 +1364,73 @@ begin
     FitWidth := FBackground.Width;
     FitHeight := FBackground.Height;
   end;
-  Scale := Min((FView.Width - 24) / FitWidth, (FView.Height - 24) / FitHeight);
+  Scale := Min((FView.Width - 2 * Margin) / FitWidth, (FView.Height - 2 * Margin) / FitHeight);
   W := Max(1, Round(FitWidth * Scale));
   H := Max(1, Round(FitHeight * Scale));
   FContent := Rect((FView.Width - W) div 2, (FView.Height - H) div 2,
     (FView.Width - W) div 2 + W, (FView.Height - H) div 2 + H);
-  EnsurePaths;
-  DrawPaths := FPaths;
-  if (Length(FPending) > 0) or (FPenSamples.Count > 0) then
+  Preview := (Length(FPending) > 0) or (FStrokeSamples.Count > 0);
+  if not FRenderValid or (W <> FBitmap.Width) or (H <> FBitmap.Height) then
+  begin
+    EnsurePaths;
+    Pixels := FRenderer.Render(FPaths, FDoc.Width, FDoc.Height, W, H, 1E20);
+    FRenderValid := Length(Pixels) > 0;
+    if not FRenderValid then Exit;
+  end
+  else if FPreviewActive and not Preview then Pixels := FRenderer.FinishPreview(False);
+  if Preview then
   begin
     Temp.Style := FStyle;
-    if FPenSamples.Count > 0 then
+    if FStrokeSamples.Count > 0 then
     begin
       Temp.Input := ikPen;
-      Temp.Samples := FPenSamples.ToArray;
+      Temp.Samples := FStrokeSamples.ToArray;
     end
     else
     begin
       Temp.Input := ikMouse;
       Temp.Anchors := Copy(FPending);
-      if FHovering then
+      if FHovering and (FHover <> FPending[High(FPending)].Position) then
       begin
         SetLength(Temp.Anchors, Length(Temp.Anchors) + 1);
         Temp.Anchors[High(Temp.Anchors)].Position := FHover;
       end;
       for I := 0 to High(Temp.Anchors) do SetAutomaticHandles(Temp.Anchors, I);
     end;
-    SetLength(DrawPaths, Length(DrawPaths) + 1);
-    DrawPaths[High(DrawPaths)] := BuildPath(Temp, FDoc.Width);
+    Pixels := FRenderer.RenderPreview(BuildPath(Temp, FDoc.Width),
+      FPreviewFreehand and (FStrokeSamples.Count > 0));
   end;
-  Pixels := FRenderer.Render(DrawPaths, FDoc.Width, FDoc.Height, W, H, 1E20);
-  if Length(Pixels) = 0 then Exit;
-  ComposeMarkerPreview(FBitmap, Pixels, FBackground, W, H);
+  FPreviewActive := Preview;
+  FPreviewFreehand := FStrokeSamples.Count > 0;
+  if Length(Pixels) > 0 then ComposePreview(Pixels, W, H);
   FView.Canvas.Draw(FContent.Left, FContent.Top, FBitmap);
   DrawSelection;
 end;
 
 procedure OpenMarkerEditor(OwnerWindow: HWND; const Document: TMarkerDocument;
   const Background: TMarkerCapture; Save: TMarkerSave);
-var Editor: TMarkerEditor;
+var
+  Editor: TMarkerEditor;
+  PreviousStyle: string;
+  PreviousDefaultStyle, PreviousShowHint: Boolean;
 begin
-  Editor := TMarkerEditor.CreateEditor(OwnerWindow, Document, Background, Save);
+  PreviousStyle := TStyleManager.ActiveStyle.Name;
+  PreviousDefaultStyle := TStyleManager.UseSystemStyleAsDefault;
+  PreviousShowHint := Application.ShowHint;
   try
-    Editor.ShowModal;
+    TStyleManager.UseSystemStyleAsDefault := True;
+    TStyleManager.SetStyle(MarkerStyleName);
+    Application.ShowHint := True;
+    Editor := TMarkerEditor.CreateEditor(OwnerWindow, Document, Background, Save);
+    try
+      Editor.ShowModal;
+    finally
+      Editor.Free;
+    end;
   finally
-    Editor.Free;
+    Application.ShowHint := PreviousShowHint;
+    TStyleManager.SetStyle(PreviousStyle);
+    TStyleManager.UseSystemStyleAsDefault := PreviousDefaultStyle;
   end;
 end;
 

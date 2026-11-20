@@ -13,6 +13,12 @@ uses
   DrawMarker_Model in 'Source\Common\DrawMarker_Model.pas',
   DrawMarker_Curves in 'Source\Common\DrawMarker_Curves.pas',
   DrawMarker_Renderer in 'Source\Common\DrawMarker_Renderer.pas',
+  HorizontalTrackBarRenderer in 'Source\Lib\HorizontalTrackBar\HorizontalTrackBarRenderer.pas',
+  HorizontalTrackBarControl in 'Source\Lib\HorizontalTrackBar\HorizontalTrackBarControl.pas',
+  ColorPickerColorMath in 'Source\Lib\ColorPicker\ColorPickerColorMath.pas',
+  ColorPickerHueBar in 'Source\Lib\ColorPicker\ColorPickerHueBar.pas',
+  ColorPickerSVArea in 'Source\Lib\ColorPicker\ColorPickerSVArea.pas',
+  MapRakuColorCode in 'Source\UI\MapRakuColorCode.pas',
   DrawMarker_Editor in 'Source\UI\DrawMarker_Editor.pas',
   SYNC_DrawMarker_FilterPlugin in 'Source\Plugin\Filter\SYNC_DrawMarker_FilterPlugin.pas';
 

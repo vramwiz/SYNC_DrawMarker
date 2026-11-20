@@ -139,7 +139,7 @@ function BuildPath(const Stroke: TMarkerStroke; CanvasWidth: Integer): TMarkerPa
 var
   Points: TList<TPathPoint>;
   I: Integer;
-  Distance, EndTime, MouseSpeed: Double;
+  Distance, MouseSpeed: Double;
   Last: TPointF;
 
   procedure Add(const P: TPointF; Time: Double; Pressure: Single; Segment: Integer; T: Single);
@@ -162,9 +162,8 @@ var
   var Left, Right: TCubic; M: Single;
   begin
     if (Depth = 9) or
-      ((Max(Magnitude(C.P1 - Lerp(C.P0, C.P3, 1 / 3)),
-        Magnitude(C.P2 - Lerp(C.P0, C.P3, 2 / 3))) < 0.30) and
-       ((Stroke.Style.Kind <> pkBrush) or (Magnitude(C.P3 - C.P0) <= MouseSpeed / 40))) then
+      (Max(Magnitude(C.P1 - Lerp(C.P0, C.P3, 1 / 3)),
+        Magnitude(C.P2 - Lerp(C.P0, C.P3, 2 / 3))) < 0.30) then
     begin
       Add(C.P3, 0, 1, Segment, T1);
       Exit;
@@ -193,15 +192,7 @@ begin
       for I := 0 to High(Stroke.Anchors) - 1 do Flatten(Curve(Stroke.Anchors, I), I, 0, 0, 1);
     end;
     Result.Points := Points.ToArray;
-    if Points.Count > 0 then
-    begin
-      EndTime := Points.Last.Time;
-      Result.Duration := Max(0.001, EndTime);
-      if (Stroke.Input = ikMouse) and (Stroke.Style.Kind = pkBrush) and (Distance > 0) then
-        for I := 0 to High(Result.Points) do
-          Result.Points[I].Pressure := 0.25 + 0.75 *
-            Power(Max(0.0, Sin(Pi * EnsureRange(Result.Points[I].Distance / Distance, 0.0, 1.0))), 0.45);
-    end;
+    if Points.Count > 0 then Result.Duration := Max(0.001, Points.Last.Time);
   finally
     Points.Free;
   end;

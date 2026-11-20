@@ -1,4 +1,4 @@
-﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
     <PropertyGroup>
         <ProjectGuid>{E0F6539F-F8F0-4883-B7A2-508E4E65E532}</ProjectGuid>
         <ProjectVersion>20.4</ProjectVersion>
@@ -42,7 +42,7 @@
         <GenDll>true</GenDll>
         <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Winapi;Vcl;$(DCC_Namespace)</DCC_Namespace>
-        <DCC_UnitSearchPath>.\Source\Common;.\Source\Lib;.\Source\Lib\FilterTable;.\Source\Plugin\Filter;.\Source\UI;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <DCC_UnitSearchPath>.\Source\Common;.\Source\Lib;.\Source\Lib\FilterTable;.\Source\Lib\HorizontalTrackBar;.\Source\Lib\ColorPicker;.\Source\Plugin\Filter;.\Source\UI;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <SanitizedProjectName>SYNC_DrawMarker</SanitizedProjectName>
         <Custom_Styles>&quot;Windows Modern Dark|VCLSTYLE|$(BDSCOMMONDIR)\Styles\WindowsModernDark.vsf&quot;</Custom_Styles>
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
@@ -106,6 +106,12 @@
         <DCCReference Include="Source\Common\DrawMarker_Model.pas"/>
         <DCCReference Include="Source\Common\DrawMarker_Curves.pas"/>
         <DCCReference Include="Source\Common\DrawMarker_Renderer.pas"/>
+        <DCCReference Include="Source\Lib\HorizontalTrackBar\HorizontalTrackBarRenderer.pas"/>
+        <DCCReference Include="Source\Lib\HorizontalTrackBar\HorizontalTrackBarControl.pas"/>
+        <DCCReference Include="Source\Lib\ColorPicker\ColorPickerColorMath.pas"/>
+        <DCCReference Include="Source\Lib\ColorPicker\ColorPickerHueBar.pas"/>
+        <DCCReference Include="Source\Lib\ColorPicker\ColorPickerSVArea.pas"/>
+        <DCCReference Include="Source\UI\MapRakuColorCode.pas"/>
         <DCCReference Include="Source\UI\DrawMarker_Editor.pas"/>
         <DCCReference Include="Source\Plugin\Filter\SYNC_DrawMarker_FilterPlugin.pas"/>
         <BuildConfiguration Include="Base">

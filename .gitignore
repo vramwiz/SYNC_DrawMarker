@@ -16,6 +16,3 @@ Win32/
 *.aux2
 *.rsm
 *.drc
-setup/*.zip
-setup/.release-*
-!setup/make_release_zip.bat

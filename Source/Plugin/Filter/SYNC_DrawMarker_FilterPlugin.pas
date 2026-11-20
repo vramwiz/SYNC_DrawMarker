@@ -83,7 +83,6 @@ var
   EditorHost: TMarkerHost;
   SpeedTrack: TFILTER_ITEM_TRACK;
   JsonItem: TFILTER_ITEM_STRING;
-  HideJson: TFILTER_ITEM_HIDE_RULE;
   EditorButton: TFILTER_ITEM_BUTTON;
   Shader: ID3DBlob;
 
@@ -385,7 +384,6 @@ begin
   AddTrack(SpeedTrack, '描画速度', 100, 0.01, 4000, 0.01);
   AddButton(EditorButton, '描画を編集', ClickEditor);
   AddString(JsonItem, JsonItemName, '');
-  AddAlwaysHideRule(HideJson, JsonItemName);
   FilterTable := GetPluginTable;
   FilterTable^.Func_Create := CreateMarker;
   FilterTable^.Func_Destroy := DestroyMarker;

@@ -98,13 +98,86 @@ begin
       Check(I < 320, 'Every pen kind makes a visible mouse stroke');
       if Pen = pkDash then Check(Pixels[100 * 320 + 48].A = 0, 'Dash includes a gap');
       if Pen = pkGlow then Check(Pixels[107 * 320 + 70].A > 0, 'Glow outside the core');
-      if Pen = pkBrush then Check(Pixels[105 * 320 + 110].A > Pixels[105 * 320 + 27].A,
-        'Mouse brush uses variable line width');
+      if Pen = pkBrush then Check((Pixels[105 * 320 + 27].A > 0) and
+        (Pixels[105 * 320 + 110].A = Pixels[105 * 320 + 27].A),
+        'Mouse brush keeps its width along the curve');
     end;
+    Doc.Strokes[0].Style := DefaultStyle(pkNormal);
+    Doc.Strokes[0].Style.Width := 20;
+    JSON := StringReplace(WriteDocument(Doc), '"pressure":1', '"pressure":0', [rfReplaceAll]);
+    Reloaded := ReadDocument(JSON, 320, 180);
+    Pixels := Renderer.Render(BuildPaths(Reloaded), 320, 180, 320, 180, 6);
+    Check((Pixels[46 * 320 + 27].A = 0) and (Pixels[46 * 320 + 116].A > 0),
+      'Normal pen uses recorded pressure even in a project with the old toggle off');
   finally
     Renderer.Free;
   end;
   Writeln('Model, stroke styles, JSON, curve split, and absolute timeline PASS');
+end;
+
+procedure TestStrokePreview;
+const
+  Width = 320;
+  Height = 180;
+var
+  Doc: TMarkerDocument;
+  Paths: TMarkerPaths;
+  Active: TMarkerPath;
+  Reference, Preview: TMarkerRenderer;
+  I: Integer;
+
+  procedure ComparePixels(const Expected, Actual: TRGBAPixels; const Description: string);
+  begin
+    Check((Length(Expected) = Width * Height) and (Length(Actual) = Length(Expected)) and
+      CompareMem(@Expected[0], @Actual[0], Length(Expected) * SizeOf(TPIXEL_RGBA)), Description);
+  end;
+
+begin
+  Doc := MakeDocument;
+  Paths := BuildPaths(Doc);
+  Active := Paths[0];
+  Active.Style := DefaultStyle(pkGlow);
+  Active.Style.Width := 120;
+  Active.Style.Opacity := 53;
+  Active.Points := Copy(Active.Points);
+  Active.Points[0].Pressure := 1;
+  Active.Points[1].Pressure := 0.05;
+  SetLength(Active.Points, 3);
+  Active.Points[2] := Active.Points[1];
+  Active.Points[2].Position := PointF(260, 120);
+  Active.Points[2].Pressure := 0.75;
+  Reference := TMarkerRenderer.Create;
+  Preview := TMarkerRenderer.Create;
+  try
+    Preview.Render(Paths, Width, Height, Width, Height, 10);
+    SetLength(Paths, 3);
+    for I := 1 to Length(Active.Points) do
+    begin
+      Paths[2] := Active;
+      SetLength(Paths[2].Points, I);
+      ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
+        Preview.RenderPreview(Paths[2], True), 'Preview follows the original pressure and opacity');
+    end;
+    Paths[2].Style.RGB := $123ABC;
+    ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
+      Preview.RenderPreview(Paths[2], True), 'Style change resets preview using the original base');
+    SetLength(Paths, 2);
+    ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
+      Preview.FinishPreview(False), 'Cancel restores the earlier strokes');
+    SetLength(Paths, 3);
+    Paths[2] := Active;
+    Preview.RenderPreview(Active, False);
+    ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
+      Preview.FinishPreview(True), 'Commit preserves the preview');
+    SetLength(Paths, 4);
+    Paths[3] := Paths[1];
+    ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
+      Preview.RenderPreview(Paths[3], False), 'The next stroke uses the committed preview');
+  finally
+    Preview.Free;
+    Reference.Free;
+  end;
+  Writeln('Incremental wide stroke preview and compositing PASS');
 end;
 
 procedure TestCaptureMatching;
@@ -238,6 +311,10 @@ begin
       Speed := PFILTER_ITEM_TRACK(FilterTable^.Items^);
       Check((Speed^.Value = 100) and SameValue(Speed^.Step, 0.01), 'Speed default and precision');
       Data := PFILTER_ITEM_STRING(PPointer(PByte(FilterTable^.Items) + 2 * SizeOf(Pointer))^);
+      Check((Data <> nil) and (string(Data^.ItemType) = 'string') and
+        (string(Data^.Name) = '描画データ'), 'Existing drawing data key and string type');
+      Check(PPointer(PByte(FilterTable^.Items) + 3 * SizeOf(Pointer))^ = nil,
+        'Drawing data has no hide rule in the filter item list');
       JSON := WriteDocument(MakeDocument);
       Data^.Value := PChar(JSON);
       Obj := Default(TOBJECT_INFO);
@@ -281,6 +358,7 @@ end;
 begin
   try
     TestModel;
+    TestStrokePreview;
     TestCaptureMatching;
     TestPlugin(ParamStr(1));
   except
