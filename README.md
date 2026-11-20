@@ -14,11 +14,3 @@ AviUtl2 の解説動画で、映像上のボタンや文字を囲んだり、経
 描画速度の初期値は **100.00**。50.00 で半分、200.00 で2倍、400.00 で4倍です。自由線は記録した経過時間、連続線は曲線長に沿って進みます。複数の一画は作成順に描かれます。描き終わった線はオブジェクトの末尾まで表示されます。
 
 フィルタオブジェクトとして追加すると、描画領域はその場で合成された下位レイヤーの入力サイズです。素材にフィルタ効果として追加すると、その素材の画像座標を使い、配置・拡大率・透明度は素材の標準描画設定に従います。
-
-## ビルドと配置
-
-Delphi 37.0 で [SYNC_DrawMarker.dproj](SYNC_DrawMarker.dproj) を開き、Win64 Release をビルドします。出力先は `C:\ProgramData\aviutl2\Plugin\SYNC_DrawMarker\SYNC_DrawMarker.aux2` です。公式 SDK の汎用プラグイン登録からフィルターと編集 UI を単一ファイルで提供します。
-
-配布 ZIP とカタログ JSON は [Setup の手順](Setup/README.md)で作成できます。
-
-入力取得の実機結果・移植手順は [AVIUTL2_FILTER_INPUT_CAPTURE.md](AVIUTL2_FILTER_INPUT_CAPTURE.md)、ビルド・検査のメモは [note.md](note.md) を参照してください。
