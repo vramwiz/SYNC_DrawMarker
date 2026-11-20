@@ -12,19 +12,27 @@ const
   MaxMarkerJSON = 8 * 1024 * 1024;
 
 type
-  TPenKind = (pkNormal, pkMarker, pkGlow, pkDash, pkBrush);
+  // 描画データの pen に序数を保存するため、新しい種類は末尾へ追加する。
+  TPenKind = (pkNormal, pkMarker, pkGlow, pkDash, pkBrush, pkChalk, pkPencil, pkCrayon);
+  TTipShape = (tsRound, tsSquare, tsTriangle, tsRectangle);
   TInputKind = (ikMouse, ikPen);
   TAnchorKind = (akSmooth, akCorner);
 
 const
-  PenNames: array[TPenKind] of string = ('通常ペン', 'マーカー', '発光ペン', '破線ペン', '筆ペン');
+  PenNames: array[TPenKind] of string = ('通常ペン', 'マーカー', '発光ペン', '破線ペン',
+    '筆ペン', 'チョーク', '鉛筆', 'クレヨン');
+  TipNames: array[TTipShape] of string = ('丸', '四角', '三角', '長方形');
+  TipExtent: array[TTipShape] of Single = (1, 1.414214, 1.154701, 1.118034);
 
 type
   TStrokeStyle = record
     Kind: TPenKind;
     RGB: Cardinal;
     Width: Single;
-    Opacity: Integer;
+    Transparency: Integer;
+    Shape: TTipShape;
+    Rotation: Integer;
+    function Matches(const Other: TStrokeStyle): Boolean;
   end;
 
   TPenSample = record
@@ -61,14 +69,20 @@ uses System.SysUtils, System.Math, System.JSON, System.Generics.Collections;
 
 function DefaultStyle(Kind: TPenKind): TStrokeStyle;
 const
-  Colors: array[TPenKind] of Cardinal = ($FF454F, $FFDF38, $39DAFF, $FF6745, $F34C70);
-  Widths: array[TPenKind] of Single = (8, 26, 8, 7, 15);
-  Alphas: array[TPenKind] of Integer = (100, 42, 100, 100, 100);
+  Colors: array[TPenKind] of Cardinal = ($FF454F, $FFDF38, $39DAFF, $FF6745, $F34C70, $F4F0E3,
+    $41434A, $EF713C);
+  Widths: array[TPenKind] of Single = (8, 26, 8, 7, 15, 24, 6, 22);
 begin
+  Result := Default(TStrokeStyle);
   Result.Kind := Kind;
   Result.RGB := Colors[Kind];
   Result.Width := Widths[Kind];
-  Result.Opacity := Alphas[Kind];
+end;
+
+function TStrokeStyle.Matches(const Other: TStrokeStyle): Boolean;
+begin
+  Result := (Kind = Other.Kind) and (RGB = Other.RGB) and (Width = Other.Width) and
+    (Transparency = Other.Transparency) and (Shape = Other.Shape) and (Rotation = Other.Rotation);
 end;
 
 function PointCount(const Doc: TMarkerDocument): Integer;
@@ -110,7 +124,7 @@ end;
 
 function ReadDocument(const Text: string; Width, Height: Integer): TMarkerDocument;
 var
-  JSON: TJSONValue;
+  JSON, TransparencyValue, ShapeValue, RotationValue: TJSONValue;
   Root, Entry: TJSONObject;
   Strokes, Points, Row: TJSONArray;
   I, J, Total, PreviousTime: Integer;
@@ -142,7 +156,20 @@ begin
       Stroke^.Style.Kind := TPenKind(IntegerValue(Entry.GetValue('pen'), 0, Ord(High(TPenKind))));
       Stroke^.Style.RGB := IntegerValue(Entry.GetValue('rgb'), 0, $FFFFFF);
       Stroke^.Style.Width := Number(Entry.GetValue('width'), 1, 512);
-      Stroke^.Style.Opacity := IntegerValue(Entry.GetValue('opacity'), 0, 100);
+      TransparencyValue := Entry.GetValue('transparency');
+      if TransparencyValue <> nil then
+        Stroke^.Style.Transparency := IntegerValue(TransparencyValue, 0, 100)
+      else
+      begin
+        TransparencyValue := Entry.GetValue('opacity');
+        if TransparencyValue <> nil then
+          Stroke^.Style.Transparency := 100 - IntegerValue(TransparencyValue, 0, 100);
+      end;
+      ShapeValue := Entry.GetValue('shape');
+      if ShapeValue <> nil then
+        Stroke^.Style.Shape := TTipShape(IntegerValue(ShapeValue, 0, Ord(High(TTipShape))));
+      RotationValue := Entry.GetValue('rotation');
+      if RotationValue <> nil then Stroke^.Style.Rotation := IntegerValue(RotationValue, 0, 359);
       Points := RequiredArray(Entry.GetValue('points'));
       Inc(Total, Points.Count);
       if (Points.Count = 0) or (Points.Count > MaxStrokePoints) or (Total > MaxMarkerPoints) then
@@ -199,8 +226,10 @@ begin
       // 旧版の互換用に、サンプル形式の筆圧フラグを出力する。
       Builder.Append('{"input":').Append(Ord(Stroke.Input)).Append(',"pen":').Append(Ord(Stroke.Style.Kind))
         .Append(',"rgb":').Append(Integer(Stroke.Style.RGB)).Append(',"width":')
-        .Append(FloatToStr(Stroke.Style.Width, Fmt)).Append(',"opacity":').Append(Stroke.Style.Opacity)
-        .Append(',"pressure":').Append(Ord(Stroke.Input = ikPen)).Append(',"points":[');
+        .Append(FloatToStr(Stroke.Style.Width, Fmt)).Append(',"transparency":').Append(Stroke.Style.Transparency);
+      if Stroke.Style.Shape <> tsRound then Builder.Append(',"shape":').Append(Ord(Stroke.Style.Shape));
+      if Stroke.Style.Rotation <> 0 then Builder.Append(',"rotation":').Append(Stroke.Style.Rotation);
+      Builder.Append(',"pressure":').Append(Ord(Stroke.Input = ikPen)).Append(',"points":[');
       if Stroke.Input = ikPen then
         for J := 0 to High(Stroke.Samples) do
         begin

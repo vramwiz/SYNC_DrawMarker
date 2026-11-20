@@ -51,9 +51,15 @@ type
 
   TEditorRequest = record
     Target: TMarkerTarget;
-    Original, Serialized: string;
+    Original: string;
     SceneWidth, SceneHeight: Integer;
-    Written: Boolean;
+  end;
+
+  PDrawingWrite = ^TDrawingWrite;
+  TDrawingWrite = record
+    Target: TMarkerTarget;
+    Original, Updated, Observed: string;
+    Written, ReadBack: Boolean;
   end;
 
   TMarkerHost = class
@@ -94,29 +100,50 @@ begin
   Result := string(UTF8String(P));
 end;
 
+function FindTargetEffect(Edit: PEDIT_SECTION; const Target: TMarkerTarget): EFFECT_HANDLE;
+var Obj: OBJECT_HANDLE;
+begin
+  Result := nil;
+  if (Edit = nil) or (Edit^.Info = nil) or (PEDIT_INFO(Edit^.Info)^.SceneID <> Target.Scene) then Exit;
+  Obj := Edit^.FindObject(Target.ObjectLayer, Target.ObjectStart);
+  if (Obj = nil) or (Edit^.GetObjectID(Obj) <> Target.ObjectID) then Exit;
+  Result := Edit^.FindEffect(Obj, PChar(Target.EffectName));
+  if (Result <> nil) and (Edit^.GetEffectID(Result) <> Target.EffectID) then Result := nil;
+end;
+
 procedure StoreJSON(Param: Pointer; Edit: PEDIT_SECTION); cdecl;
-type PRequest = ^TEditorRequest;
-var Request: PRequest; Obj: OBJECT_HANDLE; Effect: EFFECT_HANDLE; Value, Previous: UTF8String;
+var Request: PDrawingWrite; Effect: EFFECT_HANDLE; Current: string; Value: UTF8String;
 begin
   Request := Param;
   try
-    if (Edit^.Info = nil) or (PEDIT_INFO(Edit^.Info)^.SceneID <> Request^.Target.Scene) then Exit;
-    Obj := Edit^.FindObject(Request^.Target.ObjectLayer, Request^.Target.ObjectStart);
-    if (Obj = nil) or (Edit^.GetObjectID(Obj) <> Request^.Target.ObjectID) then Exit;
-    Effect := Edit^.FindEffect(Obj, PChar(Request^.Target.EffectName));
-    if (Effect = nil) or (Edit^.GetEffectID(Effect) <> Request^.Target.EffectID) then Exit;
-    if ItemValue(Edit, Effect) <> Request^.Original then Exit;
-    Value := UTF8String(Request^.Serialized);
-    if not Edit^.SetEffectItemValue(Effect, JsonItemName, PAnsiChar(Value)) then Exit;
-    if ItemValue(Edit, Effect) <> Request^.Serialized then
+    Effect := FindTargetEffect(Edit, Request^.Target);
+    if Effect = nil then Exit;
+    Current := ItemValue(Edit, Effect);
+    if Current = Request^.Updated then
+      Request^.Written := True
+    else if Current = Request^.Original then
     begin
-      Previous := UTF8String(Request^.Original);
-      Edit^.SetEffectItemValue(Effect, JsonItemName, PAnsiChar(Previous));
-      Exit;
+      Value := UTF8String(Request^.Updated);
+      Request^.Written := Edit^.SetEffectItemValue(Effect, JsonItemName, PAnsiChar(Value));
     end;
-    Request^.Written := True;
   except
     on E: Exception do OutputDebugString(PChar('SYNC_DrawMarker save: ' + E.Message));
+  end;
+end;
+
+procedure ReadStoredJSON(Param: Pointer; Edit: PEDIT_SECTION); cdecl;
+var Request: PDrawingWrite; Effect: EFFECT_HANDLE; Value: PAnsiChar;
+begin
+  Request := Param;
+  try
+    Effect := FindTargetEffect(Edit, Request^.Target);
+    if Effect = nil then Exit;
+    Value := Edit^.GetEffectItemValue(Effect, JsonItemName);
+    if Value = nil then Exit;
+    Request^.Observed := string(UTF8String(Value));
+    Request^.ReadBack := True;
+  except
+    on E: Exception do OutputDebugString(PChar('SYNC_DrawMarker readback: ' + E.Message));
   end;
 end;
 
@@ -248,12 +275,37 @@ begin
 end;
 
 function TMarkerHost.Save(const JSON: string): Boolean;
+var Request: TDrawingWrite;
 begin
   if JSON = FBaseline then Exit(True);
-  FRequest.Serialized := JSON;
-  FRequest.Written := False;
-  Result := FHandle^.CallEditSectionParam(@FRequest, StoreJSON) and FRequest.Written;
-  if not Result then raise EInvalidOp.Create('AviUtl2 に反映できません。対象のオブジェクトと編集状態を確認してください。');
+  Request := Default(TDrawingWrite);
+  Request.Target := FRequest.Target;
+  Request.Original := FRequest.Original;
+  Request.Updated := JSON;
+  if not FHandle^.CallEditSectionParam(@Request, StoreJSON) or not Request.Written then
+    raise EInvalidOp.Create('AviUtl2 に反映できません。対象のオブジェクトと編集状態を確認してください。');
+
+  // Some hosts accept the write but cannot resolve the target in a read section.
+  // A fresh edit section also sees the committed value without modifying it.
+  if not (Assigned(FHandle^.CallReadSectionParam) and
+    FHandle^.CallReadSectionParam(@Request, ReadStoredJSON) and Request.ReadBack) then
+  begin
+    Request.ReadBack := False;
+    if not FHandle^.CallEditSectionParam(@Request, ReadStoredJSON) or not Request.ReadBack then
+    begin
+      OutputDebugString('SYNC_DrawMarker: write accepted; readback unavailable');
+      Exit(True);
+    end;
+  end;
+  if Request.Observed = JSON then Exit(True);
+  if (Request.Observed <> Request.Original) and
+    (Request.Observed = Copy(JSON, 1, Length(Request.Observed))) then
+  begin
+    Request.Updated := Request.Original;
+    Request.Original := Request.Observed;
+    FHandle^.CallEditSectionParam(@Request, StoreJSON);
+  end;
+  raise EInvalidOp.Create('AviUtl2 に書き込んだ描画データが一致しませんでした。');
 end;
 
 constructor TMarkerSession.Create;

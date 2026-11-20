@@ -305,7 +305,10 @@ type
     RestartHostApp, EnumEffectName, EnumModuleInfo: Pointer;
     GetHostAppWindow: function: NativeUInt; cdecl;
     GetEditState: function: Integer; cdecl;
-    CallReadSection, CallReadSectionParam, EnumEffectItem: Pointer;
+    CallReadSection: Pointer;
+    CallReadSectionParam: function(Param: Pointer; Callback: TEditSectionParamCallback):
+      Boolean; cdecl;
+    EnumEffectItem: Pointer;
     RenderingSceneVideo: function(Frame: Integer; Param: Pointer;
       Callback: TSceneVideoCallback): Boolean; cdecl;
     RenderingSceneAudio: Pointer;

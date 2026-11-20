@@ -24,6 +24,7 @@ const
   ChromeColor = TColor($00282422);
   CanvasColor = TColor($001A1817);
   TextColor = TColor($00ECEBE8);
+  ToolbarHeight = 46;
 
 type
   TMarkerEditor = class;
@@ -37,6 +38,7 @@ type
 
   TDragPart = (dpNone, dpStroke, dpVertex, dpIncoming, dpOutgoing);
   TMarkerTool = (mtSelect, mtContinuous, mtFreehand);
+  TChromePanelClass = class of TPanel;
 
   TMarkerToolButton = class(TSpeedButton)
   private
@@ -45,13 +47,33 @@ type
     procedure ChangeScale(M, D: Integer; isDpiChange: Boolean); override;
   end;
 
+  TMarkerToolbar = class(TPanel)
+  private type
+    TSetting = record
+      Title, Readout: TLabel;
+      Control: TControl;
+      MinWidth, PreferredWidth: Integer;
+    end;
+  private
+    FSettings: array[0..3] of TSetting;
+    FCount: Integer;
+    FArranging: Boolean;
+  protected
+    procedure AlignControls(AControl: TControl; var Rect: TRect); override;
+    procedure ChangeScale(M, D: Integer; isDpiChange: Boolean); override;
+  public
+    procedure AddSetting(const Caption: string; Control: TControl; MinWidth, PreferredWidth: Integer;
+      Readout: TLabel = nil);
+  end;
+
   TMarkerColorDock = class(TPanel)
   private
-    FTitle: TLabel;
+    FTitle, FTransparencyTitle, FTransparencyValue: TLabel;
     FHue: TColorPickerHueBar;
     FArea: TColorPickerSVArea;
     FSample: TShape;
     FCode: TEdit;
+    FTransparency: THorizontalTrackBarControl;
   protected
     procedure AlignControls(AControl: TControl; var Rect: TRect); override;
   public
@@ -61,7 +83,7 @@ type
   TMarkerEditor = class(TForm)
   private
     FOwnerWindow: HWND;
-    FSave: TMarkerSave;
+    FClosingJSON: string;
     FView: TMarkerCanvas;
     FContent: TRect;
     FBackground: TMarkerCapture;
@@ -90,9 +112,9 @@ type
     FSync: Boolean;
     FToolButtons: array[TMarkerTool] of TSpeedButton;
     FUndoItem, FRedoItem, FDeleteItem, FKindItem: TMenuItem;
-    FPenPicker: TComboBox;
-    FSize, FOpacity: THorizontalTrackBarControl;
-    FSizeValue, FOpacityValue: TLabel;
+    FPenPicker, FTipPicker: TComboBox;
+    FSize, FRotation: THorizontalTrackBarControl;
+    FSizeValue, FRotationValue: TLabel;
     FColorDock: TMarkerColorDock;
     FStyleGesture: TControl;
     FRecordedStyleGesture: Boolean;
@@ -147,7 +169,7 @@ type
     procedure CreateParams(var Params: TCreateParams); override;
   public
     constructor CreateEditor(OwnerWindow: HWND; const Document: TMarkerDocument;
-      const Background: TMarkerCapture; Save: TMarkerSave);
+      const Background: TMarkerCapture);
     destructor Destroy; override;
     function IsShortCut(var Message: TWMKey): Boolean; override;
   end;
@@ -236,6 +258,117 @@ begin
   if isDpiChange then RefreshGlyph(M);
 end;
 
+procedure TMarkerToolbar.AddSetting(const Caption: string; Control: TControl;
+  MinWidth, PreferredWidth: Integer; Readout: TLabel);
+var Title: TLabel;
+begin
+  Title := TLabel.Create(Self);
+  Title.Parent := Self;
+  Title.Caption := Caption;
+  Title.StyleElements := Title.StyleElements - [seFont];
+  Control.Parent := Self;
+  Control.Hint := Caption;
+  Control.ShowHint := True;
+  if Readout <> nil then
+  begin
+    Readout.Parent := Self;
+    Readout.StyleElements := Readout.StyleElements - [seFont];
+    Readout.AutoSize := False;
+    Readout.Layout := tlCenter;
+  end;
+  FSettings[FCount].Title := Title;
+  FSettings[FCount].Control := Control;
+  FSettings[FCount].Readout := Readout;
+  FSettings[FCount].MinWidth := MinWidth;
+  FSettings[FCount].PreferredWidth := PreferredWidth;
+  Inc(FCount);
+  Realign;
+end;
+
+procedure TMarkerToolbar.AlignControls(AControl: TControl; var Rect: TRect);
+var
+  I, X, Inset, Gap, LabelGap, ValueWidth, BaseWidth, FlexWidth, Extra, Width, Height: Integer;
+  Compact: Boolean;
+  Setting: TSetting;
+begin
+  if FArranging or (csDestroying in ComponentState) then Exit;
+  FArranging := True;
+  try
+    inherited;
+    Compact := ClientWidth < ScaleValue(555);
+    if Compact then
+    begin
+      Inset := ScaleValue(6);
+      Gap := ScaleValue(6);
+      LabelGap := ScaleValue(4);
+      ValueWidth := ScaleValue(42);
+    end
+    else
+    begin
+      Inset := ScaleValue(12);
+      Gap := ScaleValue(12);
+      LabelGap := ScaleValue(8);
+      ValueWidth := ScaleValue(48);
+    end;
+    BaseWidth := 2 * Inset + Max(0, FCount - 1) * Gap;
+    FlexWidth := 0;
+    for I := 0 to FCount - 1 do
+    begin
+      Setting := FSettings[I];
+      Setting.Title.Visible := not Compact or (Setting.Readout <> nil);
+      Inc(BaseWidth, ScaleValue(Setting.MinWidth));
+      Inc(FlexWidth, ScaleValue(Setting.PreferredWidth) - ScaleValue(Setting.MinWidth));
+      if Setting.Title.Visible then Inc(BaseWidth, Setting.Title.Width + LabelGap);
+      if Setting.Readout <> nil then Inc(BaseWidth, ScaleValue(4) + ValueWidth);
+    end;
+    Extra := EnsureRange(ClientWidth - BaseWidth, 0, FlexWidth);
+    X := Inset;
+    for I := 0 to FCount - 1 do
+    begin
+      Setting := FSettings[I];
+      if Setting.Title.Visible then
+      begin
+        Setting.Title.SetBounds(X, (ClientHeight - Setting.Title.Height) div 2,
+          Setting.Title.Width, Setting.Title.Height);
+        Inc(X, Setting.Title.Width + LabelGap);
+      end;
+      Width := ScaleValue(Setting.MinWidth);
+      if FlexWidth > 0 then
+        Inc(Width, Extra * (ScaleValue(Setting.PreferredWidth) - Width) div FlexWidth);
+      Height := ScaleValue(32);
+      if Setting.Control is TComboBox then Height := Setting.Control.Height;
+      Setting.Control.SetBounds(X, (ClientHeight - Height) div 2, Width, Height);
+      Inc(X, Width);
+      if Setting.Readout <> nil then
+      begin
+        Inc(X, ScaleValue(4));
+        Setting.Readout.SetBounds(X, 0, ValueWidth, ClientHeight);
+        Inc(X, ValueWidth);
+      end;
+      Inc(X, Gap);
+    end;
+  finally
+    FArranging := False;
+  end;
+end;
+
+procedure TMarkerToolbar.ChangeScale(M, D: Integer; isDpiChange: Boolean);
+begin
+  inherited;
+  if isDpiChange then Height := MulDiv(ToolbarHeight, M, 96);
+end;
+
+function CreateMarkerSlider(Owner: TComponent; Min, Max: Integer): THorizontalTrackBarControl;
+begin
+  Result := THorizontalTrackBarControl.Create(Owner);
+  Result.BackgroundColor := ChromeColor;
+  Result.FillColor := TColor($00D89458);
+  Result.ThumbBorderColor := TextColor;
+  Result.ShowTicks := False;
+  Result.SetRange(Min, Max);
+  Result.WheelChangesPosition := False;
+end;
+
 constructor TMarkerColorDock.Create(AOwner: TComponent);
 begin
   inherited;
@@ -262,39 +395,63 @@ begin
   FCode.MaxLength := 24;
   FCode.Hint := '#RRGGBB または R,G,B';
   FCode.ShowHint := True;
+  FTransparencyTitle := TLabel.Create(Self);
+  FTransparencyTitle.Parent := Self;
+  FTransparencyTitle.Caption := '透明度';
+  FTransparencyTitle.StyleElements := FTransparencyTitle.StyleElements - [seFont];
+  FTransparencyValue := TLabel.Create(Self);
+  FTransparencyValue.Parent := Self;
+  FTransparencyValue.AutoSize := False;
+  FTransparencyValue.Alignment := taRightJustify;
+  FTransparencyValue.Layout := tlCenter;
+  FTransparencyValue.StyleElements := FTransparencyValue.StyleElements - [seFont];
+  FTransparency := CreateMarkerSlider(Self, 0, 100);
+  FTransparency.Name := 'TransparencySlider';
+  FTransparency.Parent := Self;
 end;
 
 procedure TMarkerColorDock.AlignControls(AControl: TControl; var Rect: TRect);
-var Inset, Gap, HueWidth, CodeHeight, PickerTop, CodeTop, AvailableWidth, Side: Integer;
+var
+  Inset, Gap, HueWidth, CodeHeight, PickerTop, CodeTop, AvailableWidth, Side: Integer;
+  TransparencyTop, LabelHeight, SliderHeight, ValueWidth: Integer;
 begin
   inherited;
-  if (FCode = nil) or (csDestroying in ComponentState) then Exit;
+  if (FTransparency = nil) or (csDestroying in ComponentState) then Exit;
   Inset := ScaleValue(12);
   Gap := ScaleValue(8);
   HueWidth := ScaleValue(16);
   CodeHeight := ScaleValue(28);
+  LabelHeight := Max(ScaleValue(20), FTransparencyTitle.Height);
+  SliderHeight := ScaleValue(28);
+  ValueWidth := ScaleValue(44);
   AvailableWidth := ClientWidth - 2 * Inset;
   FTitle.Left := Inset;
   FTitle.Top := Gap;
   PickerTop := FTitle.Top + FTitle.Height + Gap;
   Side := Max(1, Min(AvailableWidth - HueWidth - Gap,
-    ClientHeight - PickerTop - CodeHeight - 2 * Gap));
+    ClientHeight - PickerTop - CodeHeight - LabelHeight - SliderHeight - 4 * Gap));
   FArea.SetBounds(Inset, PickerTop, Side, Side);
   FHue.SetBounds(Inset + Side + Gap, PickerTop, HueWidth, Side);
   CodeTop := PickerTop + Side + Gap;
   FSample.SetBounds(Inset, CodeTop, CodeHeight, CodeHeight);
   FCode.SetBounds(Inset + CodeHeight + Gap, CodeTop,
     Max(1, AvailableWidth - CodeHeight - Gap), CodeHeight);
+  TransparencyTop := CodeTop + CodeHeight + 2 * Gap;
+  FTransparencyTitle.SetBounds(Inset, TransparencyTop + (LabelHeight - FTransparencyTitle.Height) div 2,
+    FTransparencyTitle.Width, FTransparencyTitle.Height);
+  FTransparencyValue.SetBounds(ClientWidth - Inset - ValueWidth, TransparencyTop, ValueWidth, LabelHeight);
+  FTransparency.SetBounds(Inset, TransparencyTop + LabelHeight, AvailableWidth, SliderHeight);
 end;
 
 constructor TMarkerEditor.CreateEditor(OwnerWindow: HWND; const Document: TMarkerDocument;
-  const Background: TMarkerCapture; Save: TMarkerSave);
+  const Background: TMarkerCapture);
 var
   Palette, Footer: TPanel;
-  Settings: TFlowPanel;
+  Settings: TMarkerToolbar;
   MainMenu: TMainMenu;
   EditMenu: TMenuItem;
   Kind: TPenKind;
+  Shape: TTipShape;
   OwnerMonitor: TMonitor;
   WorkArea: TRect;
   W, H: Integer;
@@ -325,9 +482,11 @@ var
     EditMenu.Add(Result);
   end;
 
-  function ChromePanel(Parent: TWinControl; Alignment: TAlign): TPanel;
+  function ChromePanel(Parent: TWinControl; Alignment: TAlign;
+    PanelClass: TChromePanelClass = nil): TPanel;
   begin
-    Result := TPanel.Create(Self);
+    if PanelClass = nil then PanelClass := TPanel;
+    Result := PanelClass.Create(Self);
     Result.Parent := Parent;
     Result.Align := Alignment;
     Result.BevelOuter := bvNone;
@@ -336,67 +495,25 @@ var
     Result.Color := ChromeColor;
   end;
 
-  procedure AddSetting(const Caption: string; Control: TControl; ControlWidth: Integer;
-    Readout: TLabel);
-  const RowHeight = 32;
-  var Group: TPanel; L: TLabel;
+  procedure ConnectStyleSlider(Control: THorizontalTrackBarControl);
   begin
-    Group := ChromePanel(Settings, alNone);
-    Group.Height := RowHeight;
-    Group.AlignWithMargins := True;
-    Group.Margins.SetBounds(0, 0, 12, 8);
-    Group.Constraints.MinHeight := RowHeight;
-    Group.Constraints.MaxHeight := RowHeight;
-    L := TLabel.Create(Self);
-    L.Parent := Group;
-    L.Caption := Caption;
-    L.StyleElements := L.StyleElements - [seFont];
-    L.AlignWithMargins := True;
-    L.Margins.SetBounds(0, 0, 8, 0);
-    L.Layout := tlCenter;
-    L.Align := alLeft;
-    Control.Parent := Group;
-    Control.SetBounds(Group.Width, 0, ControlWidth, Group.Height);
-    if Control is TComboBox then
-    begin
-      Control.AlignWithMargins := True;
-      Control.Margins.SetBounds(0, 4, 0, 0);
-    end;
-    Control.Align := alLeft;
-    if Readout <> nil then
-    begin
-      Readout.Parent := Group;
-      Readout.StyleElements := Readout.StyleElements - [seFont];
-      Readout.AutoSize := False;
-      Readout.SetBounds(Control.BoundsRect.Right, 0, 48, RowHeight);
-      Readout.AlignWithMargins := True;
-      Readout.Margins.SetBounds(4, 0, 0, 0);
-      Readout.Layout := tlCenter;
-      Readout.Align := alLeft;
-    end;
-    Group.AutoSize := True;
+    Control.OnChange := StyleChange;
+    Control.OnMouseDown := StyleMouseDown;
+    Control.OnMouseUp := StyleMouseUp;
   end;
 
-  function Slider(const Caption: string; Min, Max: Integer; out Readout: TLabel): THorizontalTrackBarControl;
+  function Slider(const Caption: string; Min, Max: Integer; out Readout: TLabel;
+    PreferredWidth: Integer): THorizontalTrackBarControl;
   begin
-    Result := THorizontalTrackBarControl.Create(Self);
+    Result := CreateMarkerSlider(Self, Min, Max);
     Readout := TLabel.Create(Self);
-    AddSetting(Caption, Result, 116, Readout);
-    Result.BackgroundColor := ChromeColor;
-    Result.FillColor := TColor($00D89458);
-    Result.ThumbBorderColor := TextColor;
-    Result.ShowTicks := False;
-    Result.SetRange(Min, Max);
-    Result.WheelChangesPosition := False;
-    Result.OnChange := StyleChange;
-    Result.OnMouseDown := StyleMouseDown;
-    Result.OnMouseUp := StyleMouseUp;
+    Settings.AddSetting(Caption, Result, 34, PreferredWidth, Readout);
+    ConnectStyleSlider(Result);
   end;
 
 begin
   inherited CreateNew(nil);
   FOwnerWindow := OwnerWindow;
-  FSave := Save;
   FDoc := Document;
   FBackground := Background;
   FPathsDirty := True;
@@ -423,7 +540,7 @@ begin
   ClientWidth := 970;
   ClientHeight := 660;
   Constraints.MinWidth := 408;
-  Constraints.MinHeight := 368;
+  Constraints.MinHeight := 408;
   KeyPreview := True;
   OnKeyDown := EditorKey;
   OnClose := EditorClose;
@@ -439,23 +556,23 @@ begin
   FKindItem := EditItem('頂点の種類', Ord('T'), [ssCtrl], KindClick);
   Menu := MainMenu;
 
-  Settings := TFlowPanel.Create(Self);
-  Settings.Parent := Self;
-  Settings.Align := alTop;
-  Settings.Height := 46;
-  Settings.AutoSize := True;
-  Settings.BevelOuter := bvNone;
-  Settings.ParentBackground := False;
-  Settings.StyleElements := Settings.StyleElements - [seClient];
-  Settings.Color := ChromeColor;
-  Settings.Padding.SetBounds(12, 8, 0, 4);
+  Settings := TMarkerToolbar(ChromePanel(Self, alTop, TMarkerToolbar));
+  Settings.Height := ToolbarHeight;
   FPenPicker := TComboBox.Create(Self);
-  AddSetting('ペン先', FPenPicker, 112, nil);
   FPenPicker.Style := csDropDownList;
+  Settings.AddSetting('ペン', FPenPicker, 84, 112);
   for Kind := Low(TPenKind) to High(TPenKind) do FPenPicker.Items.Add(PenNames[Kind]);
   FPenPicker.OnChange := PenChange;
-  FSize := Slider('太さ', 1, 512, FSizeValue);
-  FOpacity := Slider('不透明度', 0, 100, FOpacityValue);
+  FSize := Slider('太さ', 1, 512, FSizeValue, 116);
+  FTipPicker := TComboBox.Create(Self);
+  FTipPicker.Name := 'TipPicker';
+  FTipPicker.Style := csDropDownList;
+  Settings.AddSetting('先端', FTipPicker, 64, 82);
+  for Shape := Low(TTipShape) to High(TTipShape) do FTipPicker.Items.Add(TipNames[Shape]);
+  FTipPicker.OnChange := StyleChange;
+  FRotation := Slider('回転', 0, 359, FRotationValue, 92);
+  FRotation.Name := 'TipRotation';
+  FRotation.LargeChange := 15;
 
   Footer := ChromePanel(Self, alBottom);
   Footer.Height := 36;
@@ -485,6 +602,7 @@ begin
   FColorDock.FArea.OnMouseUp := StyleMouseUp;
   FColorDock.FCode.OnExit := ColorCodeExit;
   FColorDock.FCode.OnKeyDown := ColorCodeKeyDown;
+  ConnectStyleSlider(FColorDock.FTransparency);
 
   FView := TMarkerCanvas.Create(Self);
   FView.FEditor := Self;
@@ -546,8 +664,12 @@ begin
     SyncColor(S.RGB);
     FSize.Position := Round(S.Width);
     FSizeValue.Caption := IntToStr(FSize.Position) + ' px';
-    FOpacity.Position := S.Opacity;
-    FOpacityValue.Caption := IntToStr(FOpacity.Position) + '%';
+    FColorDock.FTransparency.Position := S.Transparency;
+    FColorDock.FTransparencyValue.Caption := IntToStr(S.Transparency) + '%';
+    FTipPicker.ItemIndex := Ord(S.Shape);
+    FRotation.Enabled := S.Shape <> tsRound;
+    FRotation.Position := S.Rotation;
+    FRotationValue.Caption := IntToStr(FRotation.Position) + '°';
     FToolButtons[FTool].Down := True;
     FDeleteItem.Enabled := (FTool = mtSelect) and (FSelected >= 0);
     FKindItem.Enabled := FDeleteItem.Enabled and (FVertex >= 0);
@@ -809,13 +931,10 @@ begin
 end;
 
 procedure TMarkerEditor.ApplyStyle(Sender: TObject);
-var S: TStrokeStyle;
 begin
   if (FTool = mtSelect) and (FSelected >= 0) then
   begin
-    S := FDoc.Strokes[FSelected].Style;
-    if (S.Kind = FStyle.Kind) and (S.RGB = FStyle.RGB) and (S.Width = FStyle.Width) and
-      (S.Opacity = FStyle.Opacity) then Exit;
+    if FDoc.Strokes[FSelected].Style.Matches(FStyle) then Exit;
     if (FStyleGesture = Sender) and (GetCaptureControl = FStyleGesture) then
     begin
       if not FRecordedStyleGesture then
@@ -849,8 +968,8 @@ end;
 procedure TMarkerEditor.PenChange(Sender: TObject);
 begin
   if FSync or (FPenPicker.ItemIndex < 0) then Exit;
-  FStyle := DefaultStyle(TPenKind(FPenPicker.ItemIndex));
-  FStyle.Width := EnsureRange(Round(FStyle.Width * FDoc.Width / 1920), 2, 512);
+  FStyle := CurrentStyle;
+  FStyle.Kind := TPenKind(FPenPicker.ItemIndex);
   ApplyStyle(Sender);
 end;
 
@@ -859,7 +978,10 @@ begin
   if FSync then Exit;
   FStyle := CurrentStyle;
   if Sender = FSize then FStyle.Width := FSize.Position
-  else FStyle.Opacity := FOpacity.Position;
+  else if Sender = FColorDock.FTransparency then FStyle.Transparency := FColorDock.FTransparency.Position
+  else if Sender = FRotation then FStyle.Rotation := FRotation.Position
+  else if FTipPicker.ItemIndex >= 0 then FStyle.Shape := TTipShape(FTipPicker.ItemIndex)
+  else Exit;
   ApplyStyle(Sender);
 end;
 
@@ -920,20 +1042,27 @@ begin
   Key := 0;
 end;
 
+function ReturnToEditor(const ErrorMessage: string): Boolean;
+begin
+  Result := not Application.Terminated and
+    (MessageDlg(ErrorMessage + sLineBreak + sLineBreak +
+      '編集画面に戻りますか？「いいえ」で未保存の変更を破棄して閉じます。',
+      mtError, [mbYes, mbNo], 0, mbNo) = mrYes);
+end;
+
 procedure TMarkerEditor.EditorClose(Sender: TObject; var Action: TCloseAction);
 begin
   try
     if ActiveControl = FColorDock.FCode then ColorCodeExit(FColorDock.FCode);
+    FStyleGesture := nil;
+    FRenderValid := False;
     EndDrag(False);
     FinishFreehand(False);
     FinishCurve;
-    if not FSave(WriteDocument(FDoc)) then Action := caNone;
+    FClosingJSON := WriteDocument(FDoc);
   except
     on E: Exception do
-    begin
-      Action := caNone;
-      MessageDlg(E.Message, mtError, [mbOK], 0);
-    end;
+      if ReturnToEditor(E.Message) then Action := caNone;
   end;
 end;
 
@@ -1042,7 +1171,8 @@ begin
     for I := High(FPaths) downto 0 do
     begin
       Limit := Max(MulDiv(8, FView.CurrentPPI, 96), FPaths[I].Style.Width *
-        Min(FContent.Width / FDoc.Width, FContent.Height / FDoc.Height) / 2 +
+        Min(FContent.Width / FDoc.Width, FContent.Height / FDoc.Height) *
+        TipExtent[FPaths[I].Style.Shape] / 2 +
         MulDiv(4, FView.CurrentPPI, 96));
       if HitPath(FPaths[I], P, FContent.Width / FDoc.Width,
         FContent.Height / FDoc.Height, Limit, Segment, T) then
@@ -1057,6 +1187,7 @@ begin
     FVertex := -1;
     if Hit >= 0 then
     begin
+      FStyle := FDoc.Strokes[Hit].Style;
       if InsertWithClick then
         if InsertVertex(HitSegment, HitT) then Exit;
       if not InsertWithClick then FDragging := HitSelectedPoint(X, Y, False, FVertex);
@@ -1421,9 +1552,22 @@ begin
     TStyleManager.UseSystemStyleAsDefault := True;
     TStyleManager.SetStyle(MarkerStyleName);
     Application.ShowHint := True;
-    Editor := TMarkerEditor.CreateEditor(OwnerWindow, Document, Background, Save);
+    Editor := TMarkerEditor.CreateEditor(OwnerWindow, Document, Background);
     try
-      Editor.ShowModal;
+      repeat
+        Editor.FClosingJSON := '';
+        Editor.ShowModal;
+        if Editor.FClosingJSON = '' then Break;
+        // The owner is re-enabled after ShowModal. AviUtl2 may update its
+        // windows while the edit section commits the data.
+        try
+          if Save(Editor.FClosingJSON) then Break;
+          raise EInvalidOp.Create('描画データを保存できませんでした。');
+        except
+          on E: Exception do
+            if not ReturnToEditor(E.Message) then Break;
+        end;
+      until Application.Terminated;
     finally
       Editor.Free;
     end;

@@ -37,6 +37,7 @@ begin
   with Result.Strokes[0] do
   begin
     Style := DefaultStyle(pkMarker);
+    Style.Transparency := 58;
     Input := ikPen;
     SetLength(Samples, 2);
     Samples[0].Position := PointF(25, 40);
@@ -65,6 +66,8 @@ begin
   JSON := WriteDocument(Doc);
   Reloaded := ReadDocument(JSON, 10, 20);
   Check(WriteDocument(Reloaded) = JSON, 'JSON roundtrip');
+  Reloaded := ReadDocument(StringReplace(JSON, '"transparency":58', '"opacity":42', []), 10, 20);
+  Check(WriteDocument(Reloaded) = JSON, 'Legacy opacity keeps the same visible alpha');
   Check(Reloaded.Width = 320, 'Reference scene size');
   Paths := BuildPaths(Doc);
   Check(Abs(Paths[1].Start - 0.88) < 1E-6, 'Pen time before curve start');
@@ -76,7 +79,7 @@ begin
   Renderer := TMarkerRenderer.Create;
   try
     First := Copy(Renderer.Render(Paths, 320, 180, 320, 180, 0.44));
-    Check(First[40 * 320 + 35].A = 107, 'Opacity of an individual marker stroke');
+    Check(First[40 * 320 + 35].A = 107, 'Transparency of an individual marker stroke');
     Check(First[40 * 320 + 115].A = 0, 'Pen endpoint has not appeared yet');
     Check(First[100 * 320 + 35].A = 0, 'Next stroke has not started');
     Pixels := Renderer.Render(Paths, 320, 180, 320, 180, 6);
@@ -91,6 +94,7 @@ begin
     for Pen := Low(TPenKind) to High(TPenKind) do
     begin
       Doc.Strokes[1].Style := DefaultStyle(Pen);
+      Check(Doc.Strokes[1].Style.Transparency = 0, 'Pen defaults to zero transparency');
       Paths := BuildPaths(Doc);
       Pixels := Renderer.Render(Paths, 320, 180, 320, 180, 6);
       I := 0;
@@ -109,13 +113,178 @@ begin
     Pixels := Renderer.Render(BuildPaths(Reloaded), 320, 180, 320, 180, 6);
     Check((Pixels[46 * 320 + 27].A = 0) and (Pixels[46 * 320 + 116].A > 0),
       'Normal pen uses recorded pressure even in a project with the old toggle off');
+    Reloaded.Strokes[0].Style.Transparency := 100;
+    Pixels := Renderer.Render(BuildPaths(Reloaded), 320, 180, 320, 180, 6);
+    Check(Pixels[40 * 320 + 60].A = 0, '100 percent transparency hides the stroke');
   finally
     Renderer.Free;
   end;
   Writeln('Model, stroke styles, JSON, curve split, and absolute timeline PASS');
 end;
 
-procedure TestStrokePreview;
+procedure TestChalk;
+var
+  Doc, Reloaded: TMarkerDocument;
+  Renderer: TMarkerRenderer;
+  Full, Partial, Pixels: TRGBAPixels;
+  JSON: string;
+  X, Y, Alpha: Integer;
+  HasGap, HasGrain, HasDeposit, VisiblePressure: Boolean;
+begin
+  Doc := MakeDocument;
+  SetLength(Doc.Strokes, 1);
+  Doc.Strokes[0].Style := DefaultStyle(pkChalk);
+  JSON := WriteDocument(Doc);
+  Reloaded := ReadDocument(JSON, Doc.Width, Doc.Height);
+  Check((Reloaded.Strokes[0].Style.Kind = pkChalk) and (WriteDocument(Reloaded) = JSON),
+    'Chalk round trips through stored drawing data');
+
+  Renderer := TMarkerRenderer.Create;
+  try
+    Full := Copy(Renderer.Render(BuildPaths(Reloaded), 320, 180, 320, 180, 1));
+    HasGap := False;
+    HasGrain := False;
+    HasDeposit := False;
+    for X := 25 to 119 do
+    begin
+      Alpha := Full[40 * 320 + X].A;
+      HasGap := HasGap or (Alpha = 0);
+      HasGrain := HasGrain or ((Alpha > 0) and (Alpha < 120));
+      HasDeposit := HasDeposit or (Alpha > 200);
+    end;
+    Check(HasGap and HasGrain and HasDeposit, 'Chalk leaves gaps and uneven deposits in the core');
+    VisiblePressure := False;
+    for X := 109 to 119 do
+      VisiblePressure := VisiblePressure or (Full[49 * 320 + X].A > 0);
+    Check((Full[49 * 320 + 25].A = 0) and VisiblePressure, 'Chalk follows recorded pressure');
+
+    Partial := Copy(Renderer.Render(BuildPaths(Reloaded), 320, 180, 320, 180, 0.5));
+    for Y := 34 to 45 do
+      Check(CompareMem(@Partial[Y * 320 + 25], @Full[Y * 320 + 25],
+        35 * SizeOf(TPIXEL_RGBA)), 'Deposited chalk stays fixed when the animation advances');
+    Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);
+    Check(CompareMem(@Full[0], @Pixels[0], Length(Full) * SizeOf(TPIXEL_RGBA)),
+      'Reload and reverse seek reproduce the chalk texture');
+  finally
+    Renderer.Free;
+  end;
+  Writeln('Chalk texture, pressure and saved drawing PASS');
+end;
+
+procedure TestTipShapes;
+var
+  Doc, Reloaded: TMarkerDocument;
+  Paths: TMarkerPaths;
+  Renderer: TMarkerRenderer;
+  Pixels: TRGBAPixels;
+  JSON: string;
+
+  procedure Draw(Shape: TTipShape; Rotation: Integer);
+  begin
+    Paths[0].Style.Shape := Shape;
+    Paths[0].Style.Rotation := Rotation;
+    Pixels := Renderer.Render(Paths, 320, 180, 320, 180, 1);
+  end;
+
+  function Alpha(X, Y: Integer): Byte;
+  begin
+    Result := Pixels[Y * 320 + X].A;
+  end;
+
+begin
+  Doc := MakeDocument;
+  JSON := WriteDocument(Doc);
+  Reloaded := ReadDocument(JSON, 320, 180);
+  Check((Pos('"shape"', JSON) = 0) and (Reloaded.Strokes[0].Style.Shape = tsRound) and
+    (Reloaded.Strokes[0].Style.Rotation = 0), 'Old stroke data defaults to round');
+  Doc.Strokes[0].Style := DefaultStyle(pkPencil);
+  Doc.Strokes[0].Style.Shape := tsRectangle;
+  Doc.Strokes[0].Style.Rotation := 90;
+  Doc.Strokes[1].Style := DefaultStyle(pkCrayon);
+  Doc.Strokes[1].Style.Shape := tsTriangle;
+  Doc.Strokes[1].Style.Rotation := 37;
+  JSON := WriteDocument(Doc);
+  Reloaded := ReadDocument(JSON, 320, 180);
+  Check(WriteDocument(Reloaded) = JSON, 'New pen, shape and rotation survive save and reload');
+
+  SetLength(Paths, 1);
+  SetLength(Paths[0].Points, 1);
+  Paths[0].Points[0].Position := PointF(100.5, 80.5);
+  Paths[0].Points[0].Pressure := 1;
+  Paths[0].Style := DefaultStyle(pkNormal);
+  Paths[0].Style.Width := 40;
+  Renderer := TMarkerRenderer.Create;
+  try
+    Draw(tsRound, 0);
+    Check((Alpha(100, 80) = 255) and (Alpha(117, 97) = 0), 'Default round tip');
+    Draw(tsSquare, 0);
+    Check((Alpha(117, 97) = 255) and (Alpha(125, 80) = 0), 'Square reaches its corners');
+    Draw(tsSquare, 45);
+    Check((Alpha(117, 97) = 0) and (Alpha(125, 80) = 255), 'Square rotates around its center');
+    Draw(tsRectangle, 0);
+    Check((Alpha(116, 80) = 255) and (Alpha(100, 96) = 0), 'Horizontal rectangle');
+    Draw(tsRectangle, 90);
+    Check((Alpha(116, 80) = 0) and (Alpha(100, 96) = 255), 'Vertical rectangle');
+    Draw(tsTriangle, 0);
+    Check((Alpha(100, 61) = 255) and (Alpha(100, 99) = 0), 'Triangle points up by default');
+    Draw(tsTriangle, 180);
+    Check((Alpha(100, 61) = 0) and (Alpha(100, 99) = 255), 'Triangle reverses direction');
+
+    SetLength(Paths[0].Points, 2);
+    Paths[0].Points[1].Position := PointF(260.5, 103.5);
+    Paths[0].Points[1].Pressure := 1;
+    Paths[0].Points[1].Time := 0.9;
+    Draw(tsRectangle, 37);
+    Check(Alpha(180, 92) = 255, 'Polygon sweeps the span between sparse samples');
+    Pixels := Renderer.Render(Paths, 320, 180, 320, 180, 0.45);
+    Check((Alpha(150, 88) = 255) and (Alpha(255, 102) = 0), 'Polygon follows drawing time');
+  finally
+    Renderer.Free;
+  end;
+  Writeln('Round, square, triangle and rotating rectangle PASS');
+end;
+
+procedure TestPencilAndCrayon;
+var
+  Doc: TMarkerDocument;
+  Renderer: TMarkerRenderer;
+  Pixels: TRGBAPixels;
+  X, LightPeak, DarkPeak: Integer;
+  HasTexture, HasSolidColor: Boolean;
+begin
+  Doc := MakeDocument;
+  SetLength(Doc.Strokes, 1);
+  Doc.Strokes[0].Style := DefaultStyle(pkPencil);
+  Doc.Strokes[0].Samples[0].Pressure := 0.1;
+  Doc.Strokes[0].Samples[1].Pressure := 0.1;
+  Renderer := TMarkerRenderer.Create;
+  try
+    Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);
+    LightPeak := 0;
+    for X := 25 to 119 do LightPeak := Max(LightPeak, Pixels[40 * 320 + X].A);
+    Doc.Strokes[0].Samples[0].Pressure := 1;
+    Doc.Strokes[0].Samples[1].Pressure := 1;
+    Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);
+    DarkPeak := 0;
+    for X := 25 to 119 do DarkPeak := Max(DarkPeak, Pixels[40 * 320 + X].A);
+    Check((LightPeak > 0) and (DarkPeak > LightPeak * 2), 'Pencil pressure changes pigment density');
+    Doc.Strokes[0].Style := DefaultStyle(pkCrayon);
+    Pixels := Renderer.Render(BuildPaths(Doc), 320, 180, 320, 180, 1);
+    HasTexture := False;
+    HasSolidColor := False;
+    for X := 25 to 119 do
+    begin
+      HasTexture := HasTexture or (Pixels[40 * 320 + X].A < 120);
+      HasSolidColor := HasSolidColor or (Pixels[40 * 320 + X].A = 255);
+    end;
+    Check(HasTexture and HasSolidColor, 'Crayon leaves grain between solid pigment');
+  finally
+    Renderer.Free;
+  end;
+  Writeln('Pencil pressure and crayon grain PASS');
+end;
+
+procedure TestStrokePreview(Pen: TPenKind; Shape: TTipShape = tsRound);
 const
   Width = 320;
   Height = 180;
@@ -136,9 +305,11 @@ begin
   Doc := MakeDocument;
   Paths := BuildPaths(Doc);
   Active := Paths[0];
-  Active.Style := DefaultStyle(pkGlow);
+  Active.Style := DefaultStyle(Pen);
   Active.Style.Width := 120;
-  Active.Style.Opacity := 53;
+  Active.Style.Transparency := 47;
+  Active.Style.Shape := Shape;
+  if Shape <> tsRound then Active.Style.Rotation := 25;
   Active.Points := Copy(Active.Points);
   Active.Points[0].Pressure := 1;
   Active.Points[1].Pressure := 0.05;
@@ -156,9 +327,10 @@ begin
       Paths[2] := Active;
       SetLength(Paths[2].Points, I);
       ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
-        Preview.RenderPreview(Paths[2], True), 'Preview follows the original pressure and opacity');
+        Preview.RenderPreview(Paths[2], True), 'Preview follows the original pressure and transparency');
     end;
-    Paths[2].Style.RGB := $123ABC;
+    if Shape = tsRound then Paths[2].Style.RGB := $123ABC
+    else Paths[2].Style.Rotation := 105;
     ComparePixels(Reference.Render(Paths, Width, Height, Width, Height, 10),
       Preview.RenderPreview(Paths[2], True), 'Style change resets preview using the original base');
     SetLength(Paths, 2);
@@ -177,7 +349,8 @@ begin
     Preview.Free;
     Reference.Free;
   end;
-  Writeln('Incremental wide stroke preview and compositing PASS');
+  Writeln('Incremental wide stroke preview and compositing PASS (pen ', Ord(Pen),
+    ', tip ', Ord(Shape), ')');
 end;
 
 procedure TestCaptureMatching;
@@ -358,7 +531,14 @@ end;
 begin
   try
     TestModel;
-    TestStrokePreview;
+    TestChalk;
+    TestTipShapes;
+    TestPencilAndCrayon;
+    TestStrokePreview(pkGlow);
+    TestStrokePreview(pkChalk);
+    TestStrokePreview(pkPencil, tsTriangle);
+    TestStrokePreview(pkCrayon, tsRectangle);
+    TestStrokePreview(pkGlow, tsSquare);
     TestCaptureMatching;
     TestPlugin(ParamStr(1));
   except
