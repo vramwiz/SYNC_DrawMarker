@@ -3,7 +3,7 @@
         "id":  "VRAMWIZ.SYNC_DrawMarker",
         "name":  "手描きマーカー",
         "type":  "フィルタプラグイン",
-        "summary":  "映像に連続線や自由線を描き、描いた順にアニメーション表示。液晶タブレットの筆圧にも対応",
+        "summary":  "手描きの線を描いた順に表示。液晶タブレットの筆圧に対応",
         "description":  "https://raw.githubusercontent.com/vramwiz/SYNC_DrawMarker/refs/heads/main/README.md",
         "author":  "VRAMの魔術師",
         "repoURL":  "https://github.com/vramwiz/SYNC_DrawMarker/",
@@ -21,10 +21,9 @@
                          }
                      ],
         "tags":  [
-                     "手描き",
-                     "マーカー",
-                     "アニメーション"
-                 ],
+          "手描き",
+          "アニメーション"
+        ],
         "dependencies":  [
 
                          ],
